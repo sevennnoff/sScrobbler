@@ -26,6 +26,7 @@ open class SettingsRepository(private val dataStore: DataStore<Preferences>? = n
         val KEY_MIN_TRACK_DURATION_MS = longPreferencesKey("min_track_duration_ms")
         val KEY_PAUSE_TIMEOUT_MS = longPreferencesKey("pause_timeout_ms")
         val KEY_SEND_NOW_PLAYING = booleanPreferencesKey("send_now_playing")
+        val KEY_DEFAULT_NEW_APPS_ALLOWED = booleanPreferencesKey("default_new_apps_allowed")
         val KEY_PACKAGE_FILTER_JSON = stringPreferencesKey("package_filter_json")
         val KEY_ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
     }
@@ -38,6 +39,7 @@ open class SettingsRepository(private val dataStore: DataStore<Preferences>? = n
         val minDuration = preferences[KEY_MIN_TRACK_DURATION_MS] ?: 30_000L
         val pauseTimeout = preferences[KEY_PAUSE_TIMEOUT_MS] ?: 1_800_000L
         val sendNowPlaying = preferences[KEY_SEND_NOW_PLAYING] ?: true
+        val defaultNewApps = preferences[KEY_DEFAULT_NEW_APPS_ALLOWED] ?: true
         val filterJson = preferences[KEY_PACKAGE_FILTER_JSON]
 
         val filter: Map<String, Boolean> = if (!filterJson.isNullOrBlank()) {
@@ -54,6 +56,7 @@ open class SettingsRepository(private val dataStore: DataStore<Preferences>? = n
             minTrackDurationMs = minDuration,
             pauseTimeoutMs = pauseTimeout,
             sendNowPlaying = sendNowPlaying,
+            defaultNewAppsAllowed = defaultNewApps,
             packageFilter = filter
         )
     } ?: emptyFlow()
@@ -78,6 +81,24 @@ open class SettingsRepository(private val dataStore: DataStore<Preferences>? = n
 
     open suspend fun updateSendNowPlaying(value: Boolean) {
         dataStore?.edit { it[KEY_SEND_NOW_PLAYING] = value }
+    }
+
+    open suspend fun setAllPackagesAllowed(packages: List<String>, allowed: Boolean) {
+        dataStore?.edit { preferences ->
+            preferences[KEY_DEFAULT_NEW_APPS_ALLOWED] = allowed
+            val filterJson = preferences[KEY_PACKAGE_FILTER_JSON]
+            val filter = if (!filterJson.isNullOrBlank()) {
+                runCatching {
+                    json.decodeFromString<Map<String, Boolean>>(filterJson).toMutableMap()
+                }.getOrDefault(mutableMapOf())
+            } else {
+                mutableMapOf()
+            }
+            for (pkg in packages) {
+                filter[pkg] = allowed
+            }
+            preferences[KEY_PACKAGE_FILTER_JSON] = json.encodeToString(filter)
+        }
     }
 
     open val isOnboardingCompletedFlow: Flow<Boolean> = dataStore?.data?.map { preferences ->

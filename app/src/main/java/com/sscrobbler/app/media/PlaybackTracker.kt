@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.PlaybackState
+import android.os.Handler
+import android.os.Looper
 import com.sscrobbler.app.lastfm.LastFmAuthRepository
 import com.sscrobbler.app.lastfm.LastFmClient
 import com.sscrobbler.app.model.Track
@@ -33,22 +35,33 @@ interface MediaControllerAdapter {
     fun unregisterCallback(callback: MediaController.Callback)
 }
 
-class SystemMediaControllerAdapter(private val controller: MediaController) : MediaControllerAdapter {
+class SystemMediaControllerAdapter(
+    private val controller: MediaController,
+    private val handler: Handler = Handler(Looper.getMainLooper())
+) : MediaControllerAdapter {
     override val packageName: String
         get() = controller.packageName
 
     override val playbackState: PlaybackState?
-        get() = controller.playbackState
+        get() = try { controller.playbackState } catch (e: Exception) { null }
 
     override val metadata: MediaMetadata?
-        get() = controller.metadata
+        get() = try { controller.metadata } catch (e: Exception) { null }
 
     override fun registerCallback(callback: MediaController.Callback) {
-        controller.registerCallback(callback)
+        try {
+            controller.registerCallback(callback, handler)
+        } catch (e: Exception) {
+            // Guard against dead remote binder or looper issues
+        }
     }
 
     override fun unregisterCallback(callback: MediaController.Callback) {
-        controller.unregisterCallback(callback)
+        try {
+            controller.unregisterCallback(callback)
+        } catch (e: Exception) {
+            // Guard against dead remote binder
+        }
     }
 }
 
@@ -134,6 +147,24 @@ class PlaybackTracker(
 
     init {
         startTicker()
+        scope.launch {
+            settingsRepository.settingsFlow.collect { settings ->
+                val activeKey = activeSessionKey
+                if (activeKey != null) {
+                    val isAllowed = settings.packageFilter[activeKey] ?: settings.defaultNewAppsAllowed
+                    if (!isAllowed) {
+                        scrobbleEngine.finalizeCurrentSession(FinalizeReason.SessionDestroyed)
+                        activeSessionKey = null
+                        activeTrack = null
+                        _activeTrackFlow.value = null
+                        _isPlayingFlow.value = false
+                        _positionFlow.value = 0L
+                        _artworkBitmapFlow.value = null
+                        cancelPauseTimeout()
+                    }
+                }
+            }
+        }
     }
 
     fun startTicker() {
@@ -152,13 +183,29 @@ class PlaybackTracker(
     }
 
     suspend fun onTick() {
+        if (activeSessionKey == null || trackedSessions[activeSessionKey] == null) {
+            MediaNotificationListener.instance?.refreshActiveSessions()
+            arbitrateActiveSession()
+        }
         val activeKey = activeSessionKey ?: return
         val session = trackedSessions[activeKey] ?: return
+
+        // Proactively check if player switched track without emitting onMetadataChanged
+        val liveMeta = session.controller.metadata
+        val liveTrack = extractTrack(liveMeta, activeKey)
+        if (liveTrack != null && liveTrack != activeTrack) {
+            handleMetadataChanged(session, liveMeta)
+            return
+        }
 
         scrobbleEngine.onTimeTick()
 
         if (session.isPlaying()) {
             val pos = session.currentPosition()
+            val duration = activeTrack?.durationMs ?: 0L
+            if (duration > 0 && lastObservedPositionMs > (duration * 0.70) && pos < 5000L) {
+                nowPlayingSentForTrack = null
+            }
             session.lastKnownPositionMs = pos
             lastObservedPositionMs = pos
             _positionFlow.value = pos
@@ -187,7 +234,7 @@ class PlaybackTracker(
         scope.launch {
             val settings = settingsRepository.getSettings()
             val allowedControllers = controllers.filter { controller ->
-                settings.packageFilter[controller.packageName] != false
+                settings.packageFilter[controller.packageName] ?: settings.defaultNewAppsAllowed
             }
 
             val newKeys = allowedControllers.map { it.packageName }.toSet()
@@ -304,8 +351,10 @@ class PlaybackTracker(
 
                 if (isPlaying) {
                     cancelPauseTimeout()
+                    currentTrack?.let { triggerNowPlaying(it) }
                 } else {
                     schedulePauseTimeout()
+                    clearNowPlaying(currentTrack)
                 }
 
                 lastObservedPositionMs = pos
@@ -433,6 +482,20 @@ class PlaybackTracker(
         pauseTimeoutJob = null
     }
 
+    private suspend fun clearNowPlaying(track: Track?) {
+        nowPlayingSentForTrack = null
+        if (track == null) return
+        val sessionKey = authRepository.getSessionKey() ?: return
+        if (sessionKey.isNotBlank() && networkDetector.isOnline()) {
+            lastFmClient.updateNowPlaying(
+                artist = track.artist,
+                track = track.title,
+                durationSeconds = 1,
+                sessionKey = sessionKey
+            )
+        }
+    }
+
     private suspend fun triggerNowPlaying(track: Track) {
         val settings = settingsRepository.getSettings()
         if (!settings.sendNowPlaying) return
@@ -457,17 +520,28 @@ class PlaybackTracker(
 
     fun extractTrack(metadata: MediaMetadata?, sourcePackage: String): Track? {
         if (metadata == null) return null
-        val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
+        var artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
             ?: metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
             ?: metadata.getString(MediaMetadata.METADATA_KEY_AUTHOR)
-        val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
+            ?: metadata.getString(MediaMetadata.METADATA_KEY_COMPOSER)
+            ?: metadata.description?.subtitle?.toString()
+
+        var title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
             ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
+            ?: metadata.description?.title?.toString()
+
+        if (artist.isNullOrBlank() && !title.isNullOrBlank() && title.contains(" - ")) {
+            val parts = title.split(" - ", limit = 2)
+            artist = parts[0].trim()
+            title = parts[1].trim()
+        }
 
         if (artist.isNullOrBlank() || title.isNullOrBlank()) {
             return null
         }
 
         val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM)
+            ?: metadata.description?.description?.toString()
         val albumArtist = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
         val durationMs = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION).let {
             if (it > 0) it else null
@@ -488,6 +562,7 @@ class PlaybackTracker(
         return try {
             metadata.getBitmap(MediaMetadata.METADATA_KEY_ART)
                 ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                ?: metadata.description?.iconBitmap
         } catch (e: Throwable) {
             null
         }

@@ -218,6 +218,11 @@ class ScrobbleEngine(
             // Save to pending scrobbles
             pendingScrobbleDao.insert(pendingEntity)
 
+            // Fetch album artwork if available
+            val artUrl = if (networkDetector.isOnline()) {
+                lastFmClient.getTrackArtworkUrl(track.artist, track.title)
+            } else null
+
             // Save to history as Pending
             val historyEntity = HistoryItemEntity(
                 id = recordId,
@@ -228,7 +233,8 @@ class ScrobbleEngine(
                 listenedSeconds = listenedSec,
                 timestamp = timestamp,
                 status = ScrobbleStatus.Pending,
-                sourcePackage = track.sourcePackage
+                sourcePackage = track.sourcePackage,
+                artworkUrl = artUrl
             )
             historyDao.insert(historyEntity)
             _statusFlow.value = ScrobbleStatus.Pending
@@ -255,6 +261,10 @@ class ScrobbleEngine(
             }
         } else {
             // Not eligible -> Skipped
+            val artUrl = if (networkDetector.isOnline()) {
+                lastFmClient.getTrackArtworkUrl(track.artist, track.title)
+            } else null
+
             val historyEntity = HistoryItemEntity(
                 id = recordId,
                 artist = track.artist,
@@ -264,7 +274,8 @@ class ScrobbleEngine(
                 listenedSeconds = listenedSec,
                 timestamp = timestamp,
                 status = ScrobbleStatus.Skipped,
-                sourcePackage = track.sourcePackage
+                sourcePackage = track.sourcePackage,
+                artworkUrl = artUrl
             )
             historyDao.insert(historyEntity)
             _statusFlow.value = ScrobbleStatus.Skipped

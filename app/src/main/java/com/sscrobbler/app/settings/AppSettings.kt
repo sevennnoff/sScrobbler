@@ -9,5 +9,6 @@ data class AppSettings(
     val minTrackDurationMs: Long = 30_000L,
     val pauseTimeoutMs: Long = 1_800_000L,
     val sendNowPlaying: Boolean = true,
+    val defaultNewAppsAllowed: Boolean = true,
     val packageFilter: Map<String, Boolean> = emptyMap()
 )

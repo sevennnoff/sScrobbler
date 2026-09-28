@@ -10,3 +10,7 @@
 local.properties
 app/build/
 *.hprof
+*.jks
+*.keystore
+*.apk
+icon_512.png

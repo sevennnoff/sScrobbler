@@ -78,8 +78,8 @@ fun StatusBadge(
             StatusEligibleContainer,
             StatusEligibleColor,
             Icons.Default.HourglassTop,
-            "Eligible",
-            "Waiting for track to end"
+            "Ready to Scrobble",
+            "Will scrobble on track end"
         )
         status == ScrobbleStatus.Scrobbled -> Quintuple(
             StatusScrobbledContainer,

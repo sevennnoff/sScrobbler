@@ -18,6 +18,7 @@ open class LastFmAuthRepository(private val dataStore: DataStore<Preferences>? =
     companion object {
         val KEY_SESSION = stringPreferencesKey("lastfm_session_key")
         val KEY_USERNAME = stringPreferencesKey("lastfm_username")
+        val KEY_AVATAR_URL = stringPreferencesKey("lastfm_avatar_url")
     }
 
     open val sessionKeyFlow: Flow<String?> = dataStore?.data?.map { preferences ->
@@ -26,6 +27,10 @@ open class LastFmAuthRepository(private val dataStore: DataStore<Preferences>? =
 
     open val usernameFlow: Flow<String?> = dataStore?.data?.map { preferences ->
         preferences[KEY_USERNAME]
+    } ?: emptyFlow()
+
+    open val avatarUrlFlow: Flow<String?> = dataStore?.data?.map { preferences ->
+        preferences[KEY_AVATAR_URL]
     } ?: emptyFlow()
 
     open val isLoggedInFlow: Flow<Boolean> = sessionKeyFlow.map { !it.isNullOrBlank() }
@@ -45,10 +50,17 @@ open class LastFmAuthRepository(private val dataStore: DataStore<Preferences>? =
         }
     }
 
+    open suspend fun saveAvatarUrl(url: String) {
+        dataStore?.edit { preferences ->
+            preferences[KEY_AVATAR_URL] = url
+        }
+    }
+
     open suspend fun clearSession() {
         dataStore?.edit { preferences ->
             preferences.remove(KEY_SESSION)
             preferences.remove(KEY_USERNAME)
+            preferences.remove(KEY_AVATAR_URL)
         }
     }
 }

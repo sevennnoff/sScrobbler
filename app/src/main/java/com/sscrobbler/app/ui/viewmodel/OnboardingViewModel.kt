@@ -119,7 +119,11 @@ class OnboardingViewModel(
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
-                    context.startActivity(intent)
+                    try {
+                        context.startActivity(intent)
+                    } catch (e: Exception) {
+                        _authState.value = LastFmAuthState.Error("Could not open browser: ${e.message}")
+                    }
                 }
                 is LastFmResult.Error -> {
                     _authState.value = LastFmAuthState.Error(res.message)
@@ -128,10 +132,10 @@ class OnboardingViewModel(
         }
     }
 
-    fun confirmBrowserAuth() {
-        val token = currentToken
+    fun confirmBrowserAuth(tokenOverride: String? = null) {
+        val token = tokenOverride ?: currentToken
         if (token.isNullOrBlank()) {
-            _authState.value = LastFmAuthState.Error("No token requested yet. Please click 'Connect Last.fm'.")
+            _authState.value = LastFmAuthState.Error("No token requested yet. Please click 'Open Last.fm Login'.")
             return
         }
 
@@ -141,6 +145,7 @@ class OnboardingViewModel(
                 is LastFmResult.Success -> {
                     val session = res.data
                     authRepository.saveSession(session.name, session.key)
+                    settingsRepository.setOnboardingCompleted(true)
                     _authState.value = LastFmAuthState.Connected(session.name)
                 }
                 is LastFmResult.Error -> {

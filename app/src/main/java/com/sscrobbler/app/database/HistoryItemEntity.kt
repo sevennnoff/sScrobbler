@@ -15,5 +15,6 @@ data class HistoryItemEntity(
     val listenedSeconds: Int,
     val timestamp: Long,
     val status: ScrobbleStatus,
-    val sourcePackage: String
+    val sourcePackage: String,
+    val artworkUrl: String? = null
 )

@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.MusicNote
@@ -77,10 +78,60 @@ fun NowPlayingScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
+        if (!state.connectionError.isNullOrBlank()) {
+            LastFmConnectionErrorBanner(error = state.connectionError)
+        }
+
         if (state.track != null) {
             ActiveTrackCard(state = state)
         } else {
             IdleStateCard(lastScrobbled = state.lastScrobbledTrack)
+        }
+    }
+}
+
+@Composable
+fun LastFmConnectionErrorBanner(error: String?) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = CardShape,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Surface(
+                shape = ChipShape,
+                color = MaterialTheme.colorScheme.error.copy(alpha = 0.2f),
+                modifier = Modifier.size(38.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.CloudOff,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Last.fm Unreachable",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+                Text(
+                    text = error ?: "Check VPN or network connection. Scrobbles will be saved offline and synced automatically later.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f)
+                )
+            }
         }
     }
 }
@@ -99,8 +150,16 @@ fun ActiveTrackCard(state: NowPlayingUiState) {
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         if (state.artwork != null) {
+            val imageBitmap = androidx.compose.runtime.remember(state.artwork) { state.artwork.asImageBitmap() }
             Image(
-                bitmap = state.artwork.asImageBitmap(),
+                bitmap = imageBitmap,
+                contentDescription = "${track.title} artwork",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        } else if (!state.lastFmArtworkUrl.isNullOrBlank()) {
+            coil.compose.AsyncImage(
+                model = state.lastFmArtworkUrl,
                 contentDescription = "${track.title} artwork",
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
@@ -269,7 +328,10 @@ fun SourceAppChip(packageName: String) {
 fun ListeningProgressCard(state: NowPlayingUiState) {
     val animatedProgress by animateFloatAsState(
         targetValue = state.thresholdProgress,
-        animationSpec = tween(durationMillis = 500),
+        animationSpec = androidx.compose.animation.core.spring(
+            dampingRatio = 0.82f,
+            stiffness = 500f
+        ),
         label = "thresholdProgress"
     )
 

@@ -3,8 +3,12 @@ package com.sscrobbler.app.lastfm
 import com.sscrobbler.app.BuildConfig
 import com.sscrobbler.app.database.PendingScrobbleEntity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.FormBody
@@ -171,6 +175,9 @@ open class LastFmClient(
         }
     }
 
+    private val _connectionErrorFlow = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    open val connectionErrorFlow: kotlinx.coroutines.flow.StateFlow<String?> = _connectionErrorFlow.asStateFlow()
+
     private fun <T> executePost(
         params: Map<String, String>,
         parser: (String) -> LastFmResult<T>
@@ -187,11 +194,147 @@ open class LastFmClient(
         return try {
             val response = client.newCall(request).execute()
             val bodyString = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                _connectionErrorFlow.value = "Last.fm error (HTTP ${response.code})"
+            } else {
+                _connectionErrorFlow.value = null
+            }
             parser(bodyString)
         } catch (e: IOException) {
+            _connectionErrorFlow.value = "Cannot reach Last.fm (check VPN / network)"
             LastFmResult.Error(null, "Network error: ${e.message}", e)
         } catch (e: Exception) {
+            _connectionErrorFlow.value = "Cannot reach Last.fm (check VPN / network)"
             LastFmResult.Error(null, "Request failed: ${e.message}", e)
         }
+    }
+
+    private val artworkCache = mutableMapOf<String, String>()
+
+    open suspend fun getTrackArtworkUrl(artist: String, track: String): String? = withContext(Dispatchers.IO) {
+        val cacheKey = "${artist.lowercase().trim()}|${track.lowercase().trim()}"
+        synchronized(artworkCache) {
+            if (artworkCache.containsKey(cacheKey)) return@withContext artworkCache[cacheKey]
+        }
+
+        try {
+            val url = "$baseUrl?method=track.getInfo&api_key=$apiKey&artist=${java.net.URLEncoder.encode(artist, "UTF-8")}&track=${java.net.URLEncoder.encode(track, "UTF-8")}&format=json"
+            val request = Request.Builder().url(url).build()
+            val response = client.newCall(request).execute()
+            val body = response.body?.string().orEmpty()
+            val element = json.parseToJsonElement(body).jsonObject
+            val trackObj = element["track"]?.jsonObject ?: return@withContext null
+            val albumObj = trackObj["album"]?.jsonObject
+            val imageArray = albumObj?.get("image")?.let {
+                if (it is JsonArray) it else null
+            }
+            val rawUrl = imageArray?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
+            if (!rawUrl.isNullOrBlank()) {
+                val bigUrl = rawUrl.replace(Regex("/u/\\d+x\\d+/"), "/u/700x0/")
+                synchronized(artworkCache) {
+                    artworkCache[cacheKey] = bigUrl
+                }
+                return@withContext bigUrl
+            }
+        } catch (e: Exception) {
+            // Ignored
+        }
+        null
+    }
+
+    open suspend fun getRecentTracks(user: String, limit: Int = 50): LastFmResult<List<LastFmHistoryTrack>> = withContext(Dispatchers.IO) {
+        try {
+            val url = "$baseUrl?method=user.getRecentTracks&user=${java.net.URLEncoder.encode(user, "UTF-8")}&api_key=$apiKey&limit=$limit&format=json"
+            val request = Request.Builder().url(url).build()
+            val response = client.newCall(request).execute()
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                _connectionErrorFlow.value = "Last.fm error (HTTP ${response.code})"
+                return@withContext LastFmResult.Error(response.code, "HTTP ${response.code}")
+            }
+            _connectionErrorFlow.value = null
+            val root = json.parseToJsonElement(body).jsonObject
+            val recenttracks = root["recenttracks"]?.jsonObject ?: return@withContext LastFmResult.Success(emptyList())
+            val trackElement = recenttracks["track"] ?: return@withContext LastFmResult.Success(emptyList())
+
+            val trackListJson = if (trackElement is JsonArray) {
+                trackElement
+            } else if (trackElement is kotlinx.serialization.json.JsonObject) {
+                JsonArray(listOf(trackElement))
+            } else {
+                JsonArray(emptyList())
+            }
+
+            val list = mutableListOf<LastFmHistoryTrack>()
+            for ((idx, elem) in trackListJson.withIndex()) {
+                val obj = elem.jsonObject
+                val artistObj = obj["artist"]
+                val artistName = if (artistObj is kotlinx.serialization.json.JsonObject) {
+                    artistObj["#text"]?.jsonPrimitive?.content.orEmpty()
+                } else {
+                    artistObj?.jsonPrimitive?.content.orEmpty()
+                }
+                val title = obj["name"]?.jsonPrimitive?.content.orEmpty()
+                val albumObj = obj["album"]?.jsonObject
+                val albumName = albumObj?.get("#text")?.jsonPrimitive?.content
+
+                val attrObj = obj["@attr"]?.jsonObject
+                val isNowPlaying = attrObj?.get("nowplaying")?.jsonPrimitive?.content == "true"
+
+                val dateObj = obj["date"]?.jsonObject
+                val uts = dateObj?.get("uts")?.jsonPrimitive?.content?.toLongOrNull() ?: System.currentTimeMillis() / 1000
+                val dateText = dateObj?.get("#text")?.jsonPrimitive?.content ?: if (isNowPlaying) "Scrobbling now" else "Just now"
+
+                val images = obj["image"] as? JsonArray
+                val imgLarge = images?.firstOrNull {
+                    it.jsonObject["size"]?.jsonPrimitive?.content == "large"
+                }?.jsonObject?.get("#text")?.jsonPrimitive?.content
+                val imgMed = images?.firstOrNull {
+                    it.jsonObject["size"]?.jsonPrimitive?.content == "medium"
+                }?.jsonObject?.get("#text")?.jsonPrimitive?.content
+                val chosenArt = (if (!imgLarge.isNullOrBlank()) imgLarge else imgMed)?.let {
+                    if (it.isNotBlank()) it else null
+                }
+
+                if (artistName.isNotBlank() && title.isNotBlank()) {
+                    list.add(
+                        LastFmHistoryTrack(
+                            id = "$uts-$idx",
+                            artist = artistName,
+                            title = title,
+                            album = albumName,
+                            timestamp = uts,
+                            timeFormatted = dateText,
+                            isNowPlaying = isNowPlaying,
+                            artworkUrl = chosenArt
+                        )
+                    )
+                }
+            }
+            LastFmResult.Success(list)
+        } catch (e: Exception) {
+            LastFmResult.Error(null, "Failed to load recent tracks: ${e.message}", e)
+        }
+    }
+
+    open suspend fun getUserAvatarUrl(username: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val url = "$baseUrl?method=user.getInfo&user=${java.net.URLEncoder.encode(username, "UTF-8")}&api_key=$apiKey&format=json"
+            val request = Request.Builder().url(url).build()
+            val response = client.newCall(request).execute()
+            val body = response.body?.string().orEmpty()
+            val element = json.parseToJsonElement(body).jsonObject
+            val userObj = element["user"]?.jsonObject ?: return@withContext null
+            val imageArray = userObj["image"]?.let {
+                if (it is JsonArray) it else null
+            }
+            val rawUrl = imageArray?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
+            if (!rawUrl.isNullOrBlank()) {
+                return@withContext rawUrl.replace(Regex("/u/\\d+x\\d+/"), "/u/300x300/")
+            }
+        } catch (e: Exception) {
+            // Ignored
+        }
+        null
     }
 }

@@ -34,13 +34,29 @@ android {
         buildConfigField("String", "LASTFM_API_SECRET", "\"$lastfmApiSecret\"")
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("../sscrobbler.jks")
+            storePassword = "sscrobbler"
+            keyAlias = "sscrobbler"
+            keyPassword = "sscrobbler"
+            enableV1Signing = true
+            enableV2Signing = true
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        debug {
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
@@ -88,6 +104,7 @@ dependencies {
     // OkHttp & Serialization
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
+    implementation(libs.coil.compose)
     implementation(libs.kotlinx.serialization.json)
 
     // Coroutines

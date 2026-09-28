@@ -47,11 +47,11 @@ fun MainNavigation(
     historyViewModel: HistoryViewModel,
     settingsViewModel: SettingsViewModel,
     onboardingViewModel: OnboardingViewModel,
-    isOnboardingCompleted: Boolean,
+    initialDestination: AppDestination = AppDestination.NowPlaying,
     modifier: Modifier = Modifier
 ) {
     var currentDestination by rememberSaveable {
-        mutableStateOf(if (isOnboardingCompleted) AppDestination.NowPlaying else AppDestination.Onboarding)
+        mutableStateOf(initialDestination)
     }
 
     // Predictive back handling
@@ -98,7 +98,36 @@ fun MainNavigation(
     ) { innerPadding ->
         AnimatedContent(
             targetState = currentDestination,
-            transitionSpec = { fadeIn().togetherWith(fadeOut()) },
+            transitionSpec = {
+                val forward = targetState.ordinal > initialState.ordinal
+                val springSpec = androidx.compose.animation.core.spring<Float>(
+                    dampingRatio = 0.82f,
+                    stiffness = 700f
+                )
+                val springOffset = androidx.compose.animation.core.spring<androidx.compose.ui.unit.IntOffset>(
+                    dampingRatio = 0.82f,
+                    stiffness = 700f
+                )
+                if (forward) {
+                    (androidx.compose.animation.slideInHorizontally(springOffset) { (it * 0.28f).toInt() } +
+                     androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) +
+                     androidx.compose.animation.scaleIn(initialScale = 0.95f, animationSpec = springSpec))
+                    .togetherWith(
+                        androidx.compose.animation.slideOutHorizontally(springOffset) { -(it * 0.28f).toInt() } +
+                        androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(120)) +
+                        androidx.compose.animation.scaleOut(targetScale = 1.03f, animationSpec = springSpec)
+                    )
+                } else {
+                    (androidx.compose.animation.slideInHorizontally(springOffset) { -(it * 0.28f).toInt() } +
+                     androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) +
+                     androidx.compose.animation.scaleIn(initialScale = 1.03f, animationSpec = springSpec))
+                    .togetherWith(
+                        androidx.compose.animation.slideOutHorizontally(springOffset) { (it * 0.28f).toInt() } +
+                        androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(120)) +
+                        androidx.compose.animation.scaleOut(targetScale = 0.95f, animationSpec = springSpec)
+                    )
+                }
+            },
             label = "screenTransition",
             modifier = Modifier.padding(innerPadding)
         ) { destination ->

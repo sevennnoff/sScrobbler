@@ -21,6 +21,9 @@ interface HistoryDao {
     @Query("UPDATE history_items SET status = :status WHERE id = :id")
     suspend fun updateStatus(id: String, status: ScrobbleStatus)
 
+    @Query("UPDATE history_items SET artworkUrl = :artworkUrl WHERE id = :id")
+    suspend fun updateArtworkUrl(id: String, artworkUrl: String)
+
     @Query("DELETE FROM history_items WHERE id NOT IN (SELECT id FROM history_items ORDER BY timestamp DESC LIMIT :keepCount)")
     suspend fun prune(keepCount: Int = 500)
 

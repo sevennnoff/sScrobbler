@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 data class NowPlayingUiState(
     val track: Track? = null,
@@ -33,8 +34,10 @@ data class NowPlayingUiState(
     val thresholdProgress: Float = 0f,
     val trackProgress: Float = 0f,
     val artwork: Bitmap? = null,
+    val lastFmArtworkUrl: String? = null,
     val sourcePackage: String = "",
-    val lastScrobbledTrack: HistoryItemEntity? = null
+    val lastScrobbledTrack: HistoryItemEntity? = null,
+    val connectionError: String? = null
 ) {
     val isIdle: Boolean get() = track == null
 
@@ -62,10 +65,13 @@ class NowPlayingViewModel(
     private val scrobbleEngine: ScrobbleEngine,
     private val settingsRepository: SettingsRepository,
     private val historyDao: HistoryDao,
+    private val lastFmClient: com.sscrobbler.app.lastfm.LastFmClient = com.sscrobbler.app.lastfm.LastFmClient(),
     private val clock: Clock = SystemClockImpl
 ) : ViewModel() {
 
     private val lastScrobbledFlow = historyDao.getRecentFlow(1)
+    private val lastFmArtworkFlow = MutableStateFlow<String?>(null)
+    private var lastLookedUpTrack: Track? = null
 
     val uiState: StateFlow<NowPlayingUiState> = combine(
         playbackTracker.activeTrackFlow,
@@ -75,7 +81,9 @@ class NowPlayingViewModel(
         scrobbleEngine.currentSessionFlow,
         settingsRepository.settingsFlow,
         playbackTracker.artworkBitmapFlow,
-        lastScrobbledFlow
+        lastScrobbledFlow,
+        lastFmArtworkFlow,
+        lastFmClient.connectionErrorFlow
     ) { args: Array<Any?> ->
         val track = args[0] as? Track
         val status = (args[1] as? ScrobbleStatus) ?: ScrobbleStatus.Listening
@@ -85,11 +93,28 @@ class NowPlayingViewModel(
         val settings = (args[5] as? AppSettings) ?: AppSettings()
         val artwork = args[6] as? Bitmap
         val recentList = args[7] as? List<*>
+        val lastFmArtworkUrl = args[8] as? String
+        val connectionError = args[9] as? String
         val lastScrobbled = recentList?.firstOrNull() as? HistoryItemEntity
 
         val currentTrack = track ?: session?.track
         val durationMs = currentTrack?.durationMs
         val listenedMs = session?.totalListenedMs(clock) ?: 0L
+
+        if (currentTrack != null && currentTrack != lastLookedUpTrack) {
+            lastLookedUpTrack = currentTrack
+            if (artwork == null) {
+                viewModelScope.launch {
+                    val art = lastFmClient.getTrackArtworkUrl(currentTrack.artist, currentTrack.title)
+                    lastFmArtworkFlow.value = art
+                }
+            } else {
+                lastFmArtworkFlow.value = null
+            }
+        } else if (currentTrack == null) {
+            lastLookedUpTrack = null
+            lastFmArtworkFlow.value = null
+        }
 
         val thresholdMs = ScrobbleEngine.calculateThreshold(
             durationMs = durationMs,
@@ -117,8 +142,10 @@ class NowPlayingViewModel(
             thresholdProgress = thresholdProgress,
             trackProgress = trackProgress,
             artwork = artwork,
-            sourcePackage = currentTrack?.sourcePackage ?: "",
-            lastScrobbledTrack = lastScrobbled
+            lastFmArtworkUrl = lastFmArtworkUrl,
+            sourcePackage = currentTrack?.sourcePackage.orEmpty(),
+            lastScrobbledTrack = lastScrobbled,
+            connectionError = connectionError
         )
     }.stateIn(
         scope = viewModelScope,
@@ -131,6 +158,7 @@ class NowPlayingViewModel(
         private val scrobbleEngine: ScrobbleEngine,
         private val settingsRepository: SettingsRepository,
         private val historyDao: HistoryDao,
+        private val lastFmClient: com.sscrobbler.app.lastfm.LastFmClient = com.sscrobbler.app.lastfm.LastFmClient(),
         private val clock: Clock = SystemClockImpl
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
@@ -140,6 +168,7 @@ class NowPlayingViewModel(
                 scrobbleEngine = scrobbleEngine,
                 settingsRepository = settingsRepository,
                 historyDao = historyDao,
+                lastFmClient = lastFmClient,
                 clock = clock
             ) as T
         }
