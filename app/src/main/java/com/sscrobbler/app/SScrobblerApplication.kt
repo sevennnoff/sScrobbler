@@ -29,6 +29,16 @@ class SScrobblerApplication : Application() {
         )
     }
 
+    val playbackTracker by lazy {
+        com.sscrobbler.app.media.PlaybackTracker(
+            scrobbleEngine = scrobbleEngine,
+            settingsRepository = settingsRepository,
+            authRepository = authRepository,
+            lastFmClient = lastFmClient,
+            networkDetector = networkDetector
+        )
+    }
+
     override fun onCreate() {
         super.onCreate()
     }
