@@ -48,6 +48,9 @@ class ScrobbleEngine(
     private val _statusFlow = MutableStateFlow<ScrobbleStatus>(ScrobbleStatus.Listening)
     val statusFlow: StateFlow<ScrobbleStatus> = _statusFlow.asStateFlow()
 
+    private val _currentSessionFlow = MutableStateFlow<PlaybackSession?>(null)
+    val currentSessionFlow: StateFlow<PlaybackSession?> = _currentSessionFlow.asStateFlow()
+
     suspend fun onTrackStarted(track: Track) {
         val settings = settingsRepository.getSettings()
 
@@ -70,6 +73,7 @@ class ScrobbleEngine(
             eligible = false
         )
         currentSession = session
+        _currentSessionFlow.value = session
         lastKnownPositionMs = 0L
         pausedAtElapsedMs = null
         _statusFlow.value = ScrobbleStatus.Listening
@@ -97,11 +101,13 @@ class ScrobbleEngine(
             session.onPlay(clock)
             pausedAtElapsedMs = null
             checkEligibility()
+            _currentSessionFlow.value = session
             _statusFlow.value = if (session.eligible) ScrobbleStatus.WaitingForEnd else ScrobbleStatus.Listening
         } else {
             session.onPauseOrStop(clock)
             pausedAtElapsedMs = clock.elapsedRealtime()
             checkEligibility()
+            _currentSessionFlow.value = session
             _statusFlow.value = if (session.eligible) ScrobbleStatus.Eligible else ScrobbleStatus.Paused
         }
     }
@@ -145,6 +151,7 @@ class ScrobbleEngine(
 
         if (session.isPlaying) {
             checkEligibility(settings)
+            _currentSessionFlow.value = session
             _statusFlow.value = if (session.eligible) ScrobbleStatus.WaitingForEnd else ScrobbleStatus.Listening
         } else {
             // Check pause timeout
@@ -264,6 +271,7 @@ class ScrobbleEngine(
         }
 
         currentSession = null
+        _currentSessionFlow.value = null
         lastKnownPositionMs = null
         pausedAtElapsedMs = null
     }

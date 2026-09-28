@@ -27,6 +27,7 @@ open class SettingsRepository(private val dataStore: DataStore<Preferences>? = n
         val KEY_PAUSE_TIMEOUT_MS = longPreferencesKey("pause_timeout_ms")
         val KEY_SEND_NOW_PLAYING = booleanPreferencesKey("send_now_playing")
         val KEY_PACKAGE_FILTER_JSON = stringPreferencesKey("package_filter_json")
+        val KEY_ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
     }
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -77,6 +78,18 @@ open class SettingsRepository(private val dataStore: DataStore<Preferences>? = n
 
     open suspend fun updateSendNowPlaying(value: Boolean) {
         dataStore?.edit { it[KEY_SEND_NOW_PLAYING] = value }
+    }
+
+    open val isOnboardingCompletedFlow: Flow<Boolean> = dataStore?.data?.map { preferences ->
+        preferences[KEY_ONBOARDING_COMPLETED] ?: false
+    } ?: kotlinx.coroutines.flow.flowOf(false)
+
+    open suspend fun isOnboardingCompleted(): Boolean {
+        return isOnboardingCompletedFlow.first()
+    }
+
+    open suspend fun setOnboardingCompleted(completed: Boolean = true) {
+        dataStore?.edit { it[KEY_ONBOARDING_COMPLETED] = completed }
     }
 
     open suspend fun setPackageAllowed(packageName: String, allowed: Boolean) {

@@ -1,5 +1,6 @@
 package com.sscrobbler.app.media
 
+import android.graphics.Bitmap
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.PlaybackState
@@ -18,6 +19,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -110,6 +114,21 @@ class PlaybackTracker(
     private var lastObservedPositionMs: Long = 0L
     private var nowPlayingSentForTrack: Track? = null
 
+    private val _activeTrackFlow = MutableStateFlow<Track?>(null)
+    val activeTrackFlow: StateFlow<Track?> = _activeTrackFlow.asStateFlow()
+
+    private val _isPlayingFlow = MutableStateFlow(false)
+    val isPlayingFlow: StateFlow<Boolean> = _isPlayingFlow.asStateFlow()
+
+    private val _positionFlow = MutableStateFlow(0L)
+    val positionFlow: StateFlow<Long> = _positionFlow.asStateFlow()
+
+    private val _artworkBitmapFlow = MutableStateFlow<Bitmap?>(null)
+    val artworkBitmapFlow: StateFlow<Bitmap?> = _artworkBitmapFlow.asStateFlow()
+
+    private val _discoveredPackagesFlow = MutableStateFlow<Set<String>>(emptySet())
+    val discoveredPackagesFlow: StateFlow<Set<String>> = _discoveredPackagesFlow.asStateFlow()
+
     private var pauseTimeoutJob: Job? = null
     private var tickJob: Job? = null
 
@@ -142,20 +161,29 @@ class PlaybackTracker(
             val pos = session.currentPosition()
             session.lastKnownPositionMs = pos
             lastObservedPositionMs = pos
+            _positionFlow.value = pos
+            _isPlayingFlow.value = true
             scrobbleEngine.onPositionChanged(pos)
         } else {
             val pos = session.currentPosition()
+            _positionFlow.value = pos
+            _isPlayingFlow.value = false
             val duration = activeTrack?.durationMs ?: 0L
             if (duration > 0 && pos >= (duration - 3000L)) {
                 scrobbleEngine.finalizeCurrentSession(FinalizeReason.NaturalEnd)
                 activeSessionKey = null
                 activeTrack = null
+                _activeTrackFlow.value = null
+                _isPlayingFlow.value = false
+                _positionFlow.value = 0L
+                _artworkBitmapFlow.value = null
                 cancelPauseTimeout()
             }
         }
     }
 
     fun onActiveSessionsChanged(controllers: List<MediaControllerAdapter>) {
+        _discoveredPackagesFlow.value = _discoveredPackagesFlow.value + controllers.map { it.packageName }.toSet()
         scope.launch {
             val settings = settingsRepository.getSettings()
             val allowedControllers = controllers.filter { controller ->
@@ -196,6 +224,7 @@ class PlaybackTracker(
 
     fun registerController(controller: MediaControllerAdapter) {
         val pkg = controller.packageName
+        _discoveredPackagesFlow.value = _discoveredPackagesFlow.value + pkg
         if (trackedSessions.containsKey(pkg)) return
 
         val session = ControllerSession(controller)
@@ -217,6 +246,10 @@ class PlaybackTracker(
                 scrobbleEngine.finalizeCurrentSession(FinalizeReason.SessionDestroyed)
                 activeSessionKey = null
                 activeTrack = null
+                _activeTrackFlow.value = null
+                _isPlayingFlow.value = false
+                _positionFlow.value = 0L
+                _artworkBitmapFlow.value = null
                 cancelPauseTimeout()
                 arbitrateActiveSession()
             }
@@ -238,6 +271,9 @@ class PlaybackTracker(
                 val pos = session.currentPosition()
                 val duration = currentTrack?.durationMs ?: 0L
 
+                _isPlayingFlow.value = isPlaying
+                _positionFlow.value = pos
+
                 // Repeat detection on state change:
                 // old position > 70% and new position < 5s while playing
                 if (duration > 0 && lastObservedPositionMs > (duration * 0.70) && pos < 5000L && isPlaying) {
@@ -256,6 +292,10 @@ class PlaybackTracker(
                     scrobbleEngine.finalizeCurrentSession(FinalizeReason.NaturalEnd)
                     activeSessionKey = null
                     activeTrack = null
+                    _activeTrackFlow.value = null
+                    _isPlayingFlow.value = false
+                    _positionFlow.value = 0L
+                    _artworkBitmapFlow.value = null
                     cancelPauseTimeout()
                     return@launch
                 }
@@ -285,15 +325,20 @@ class PlaybackTracker(
                 if (newTrack != null && newTrack != activeTrack) {
                     scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackChanged)
                     activeTrack = newTrack
+                    _activeTrackFlow.value = newTrack
+                    _artworkBitmapFlow.value = extractArtwork(metadata)
                     lastObservedPositionMs = 0L
                     session.lastKnownPositionMs = 0L
+                    _positionFlow.value = 0L
                     cancelPauseTimeout()
                     scrobbleEngine.onTrackStarted(newTrack)
                     if (session.isPlaying()) {
+                        _isPlayingFlow.value = true
                         scrobbleEngine.onPlaybackStateChanged(true)
                         triggerNowPlaying(newTrack)
                     }
                 } else if (newTrack != null && newTrack == activeTrack) {
+                    _artworkBitmapFlow.value = extractArtwork(metadata)
                     val pos = session.currentPosition()
                     val duration = newTrack.durationMs ?: 0L
                     if (duration > 0 && lastObservedPositionMs > (duration * 0.70) && pos < 5000L) {
@@ -302,6 +347,7 @@ class PlaybackTracker(
                         triggerNowPlaying(newTrack)
                         lastObservedPositionMs = pos
                         session.lastKnownPositionMs = pos
+                        _positionFlow.value = pos
                     }
                 }
             } else if (session.isPlaying()) {
@@ -341,10 +387,13 @@ class PlaybackTracker(
         activeSessionKey = newKey
         val track = extractTrack(newSession.lastMetadata, newKey)
         activeTrack = track
+        _activeTrackFlow.value = track
+        _artworkBitmapFlow.value = extractArtwork(newSession.lastMetadata)
 
         if (track != null) {
             scrobbleEngine.onTrackStarted(track)
             val isPlaying = newSession.isPlaying()
+            _isPlayingFlow.value = isPlaying
             scrobbleEngine.onPlaybackStateChanged(isPlaying)
             if (isPlaying) {
                 cancelPauseTimeout()
@@ -354,6 +403,10 @@ class PlaybackTracker(
             }
             lastObservedPositionMs = newSession.currentPosition()
             newSession.lastKnownPositionMs = lastObservedPositionMs
+            _positionFlow.value = lastObservedPositionMs
+        } else {
+            _isPlayingFlow.value = false
+            _positionFlow.value = 0L
         }
     }
 
@@ -367,6 +420,10 @@ class PlaybackTracker(
                 scrobbleEngine.finalizeCurrentSession(FinalizeReason.PauseTimeout)
                 activeSessionKey = null
                 activeTrack = null
+                _activeTrackFlow.value = null
+                _isPlayingFlow.value = false
+                _positionFlow.value = 0L
+                _artworkBitmapFlow.value = null
             }
         }
     }
@@ -424,6 +481,16 @@ class PlaybackTracker(
             durationMs = durationMs,
             sourcePackage = sourcePackage
         )
+    }
+
+    fun extractArtwork(metadata: MediaMetadata?): Bitmap? {
+        if (metadata == null) return null
+        return try {
+            metadata.getBitmap(MediaMetadata.METADATA_KEY_ART)
+                ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+        } catch (e: Throwable) {
+            null
+        }
     }
 
     fun destroy() {
