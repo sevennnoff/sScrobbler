@@ -145,9 +145,11 @@ class PlaybackTracker(
     private var pauseTimeoutJob: Job? = null
     private var tickJob: Job? = null
 
+    private var settingsJob: kotlinx.coroutines.Job? = null
+
     init {
         startTicker()
-        scope.launch {
+        settingsJob = scope.launch {
             settingsRepository.settingsFlow.collect { settings ->
                 val activeKey = activeSessionKey
                 if (activeKey != null) {
@@ -416,7 +418,6 @@ class PlaybackTracker(
             playingSessions.maxByOrNull { it.lastStateChangeElapsedMs }
         } else {
             activeSessionKey?.let { trackedSessions[it] }
-                ?: trackedSessions.values.maxByOrNull { it.lastStateChangeElapsedMs }
         }
 
         val targetKey = candidate?.controller?.packageName
@@ -570,6 +571,8 @@ class PlaybackTracker(
 
     fun destroy() {
         stopTicker()
+        settingsJob?.cancel()
+        settingsJob = null
         cancelPauseTimeout()
         trackedSessions.values.forEach { it.controller.unregisterCallback(it) }
         trackedSessions.clear()

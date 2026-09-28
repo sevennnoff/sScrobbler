@@ -395,6 +395,13 @@ class FakeHistoryDao : HistoryDao {
             items[index] = old.copy(status = status)
         }
     }
+    override suspend fun updateArtworkUrl(id: String, artworkUrl: String) {
+        val index = items.indexOfFirst { it.id == id }
+        if (index >= 0) {
+            val old = items[index]
+            items[index] = old.copy(artworkUrl = artworkUrl)
+        }
+    }
     override suspend fun prune(keepCount: Int) {
         if (items.size > keepCount) {
             val toKeep = items.take(keepCount)

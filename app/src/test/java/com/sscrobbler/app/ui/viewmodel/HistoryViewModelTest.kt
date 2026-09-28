@@ -2,6 +2,8 @@ package com.sscrobbler.app.ui.viewmodel
 
 import com.sscrobbler.app.database.HistoryDao
 import com.sscrobbler.app.database.HistoryItemEntity
+import com.sscrobbler.app.lastfm.LastFmAuthRepository
+import com.sscrobbler.app.lastfm.LastFmClient
 import com.sscrobbler.app.model.ScrobbleStatus
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -10,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -29,13 +32,17 @@ class HistoryViewModelTest {
 
     private val testDispatcher = StandardTestDispatcher()
     private lateinit var historyDao: HistoryDao
-    private val historyFlow = MutableStateFlow<List<HistoryItemEntity>>(emptyList())
+    private lateinit var authRepository: LastFmAuthRepository
+    private lateinit var lastFmClient: LastFmClient
 
     @Before
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
         historyDao = mockk(relaxed = true)
-        coEvery { historyDao.getRecentFlow(500) } returns historyFlow
+        authRepository = mockk(relaxed = true)
+        lastFmClient = mockk(relaxed = true)
+        coEvery { authRepository.getUsername() } returns null
+        coEvery { historyDao.getRecent(any()) } returns emptyList()
     }
 
     @After
@@ -45,7 +52,7 @@ class HistoryViewModelTest {
 
     @Test
     fun testEmptyHistoryState() = runTest(testDispatcher) {
-        val viewModel = HistoryViewModel(historyDao)
+        val viewModel = HistoryViewModel(historyDao, authRepository, lastFmClient)
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect()
         }
@@ -58,13 +65,7 @@ class HistoryViewModelTest {
     }
 
     @Test
-    fun testPopulatedHistoryState() = runTest(testDispatcher) {
-        val viewModel = HistoryViewModel(historyDao)
-        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
-            viewModel.uiState.collect()
-        }
-        runCurrent()
-
+    fun testPopulatedLocalHistoryState() = runTest(testDispatcher) {
         val item1 = HistoryItemEntity(
             id = "1",
             artist = "Lana Del Rey",
@@ -88,21 +89,26 @@ class HistoryViewModelTest {
             sourcePackage = "com.spotify.music"
         )
 
-        historyFlow.value = listOf(item2, item1)
+        coEvery { historyDao.getRecent(any()) } returns listOf(item2, item1)
+
+        val viewModel = HistoryViewModel(historyDao, authRepository, lastFmClient)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect()
+        }
         runCurrent()
 
         val state = viewModel.uiState.value
         assertFalse(state.isEmpty)
         assertEquals(2, state.items.size)
         assertEquals("Creep", state.items[0].title)
-        assertEquals(ScrobbleStatus.Skipped, state.items[0].status)
+        assertEquals("Radiohead", state.items[0].artist)
         assertEquals("West Coast", state.items[1].title)
-        assertEquals(ScrobbleStatus.Scrobbled, state.items[1].status)
+        assertEquals("Lana Del Rey", state.items[1].artist)
     }
 
     @Test
     fun testClearHistoryCallsDao() = runTest(testDispatcher) {
-        val viewModel = HistoryViewModel(historyDao)
+        val viewModel = HistoryViewModel(historyDao, authRepository, lastFmClient)
         runCurrent()
 
         viewModel.clearHistory()
@@ -113,7 +119,7 @@ class HistoryViewModelTest {
 
     @Test
     fun testDeleteItemCallsDao() = runTest(testDispatcher) {
-        val viewModel = HistoryViewModel(historyDao)
+        val viewModel = HistoryViewModel(historyDao, authRepository, lastFmClient)
         runCurrent()
 
         viewModel.deleteItem("test-id-123")

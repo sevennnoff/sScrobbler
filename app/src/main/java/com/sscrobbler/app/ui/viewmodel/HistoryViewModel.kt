@@ -100,6 +100,15 @@ class HistoryViewModel(
         }
     }
 
+    fun clearHistory() = clearLocalHistory()
+
+    fun deleteItem(id: String) {
+        viewModelScope.launch {
+            historyDao.deleteById(id)
+            loadHistory()
+        }
+    }
+
     class Factory(
         private val historyDao: HistoryDao,
         private val authRepository: LastFmAuthRepository,

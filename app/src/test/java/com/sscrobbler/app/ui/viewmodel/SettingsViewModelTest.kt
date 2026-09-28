@@ -49,6 +49,8 @@ class SettingsViewModelTest {
 
         coEvery { authRepository.usernameFlow } returns usernameFlow
         coEvery { authRepository.isLoggedInFlow } returns isLoggedInFlow
+        coEvery { authRepository.avatarUrlFlow } returns MutableStateFlow<String?>(null)
+        coEvery { authRepository.getUsername() } returns "test_user"
         coEvery { settingsRepository.settingsFlow } returns settingsFlow
         coEvery { playbackTracker.discoveredPackagesFlow } returns discoveredPackagesFlow
     }
@@ -60,6 +62,7 @@ class SettingsViewModelTest {
 
     @Test
     fun testSettingsUiStateReflectsRepository() = runTest(testDispatcher) {
+        discoveredPackagesFlow.value = setOf("com.spotify.music")
         val viewModel = SettingsViewModel(
             settingsRepository = settingsRepository,
             authRepository = authRepository,
