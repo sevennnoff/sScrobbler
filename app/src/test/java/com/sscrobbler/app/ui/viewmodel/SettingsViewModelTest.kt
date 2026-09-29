@@ -1,6 +1,7 @@
 package com.sscrobbler.app.ui.viewmodel
 
 import com.sscrobbler.app.lastfm.LastFmAuthRepository
+import com.sscrobbler.app.lastfm.LastFmClient
 import com.sscrobbler.app.media.PlaybackTracker
 import com.sscrobbler.app.settings.AppSettings
 import com.sscrobbler.app.settings.SettingsRepository
@@ -33,6 +34,7 @@ class SettingsViewModelTest {
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var authRepository: LastFmAuthRepository
     private lateinit var playbackTracker: PlaybackTracker
+    private lateinit var lastFmClient: LastFmClient
 
     private val usernameFlow = MutableStateFlow<String?>("test_user")
     private val isLoggedInFlow = MutableStateFlow(true)
@@ -46,6 +48,7 @@ class SettingsViewModelTest {
         settingsRepository = mockk(relaxed = true)
         authRepository = mockk(relaxed = true)
         playbackTracker = mockk(relaxed = true)
+        lastFmClient = mockk(relaxed = true)
 
         coEvery { authRepository.usernameFlow } returns usernameFlow
         coEvery { authRepository.isLoggedInFlow } returns isLoggedInFlow
@@ -53,6 +56,7 @@ class SettingsViewModelTest {
         coEvery { authRepository.getUsername() } returns "test_user"
         coEvery { settingsRepository.settingsFlow } returns settingsFlow
         coEvery { playbackTracker.discoveredPackagesFlow } returns discoveredPackagesFlow
+        coEvery { lastFmClient.getUserAvatarUrl(any()) } returns null
     }
 
     @After
@@ -66,7 +70,8 @@ class SettingsViewModelTest {
         val viewModel = SettingsViewModel(
             settingsRepository = settingsRepository,
             authRepository = authRepository,
-            playbackTracker = playbackTracker
+            playbackTracker = playbackTracker,
+            lastFmClient = lastFmClient
         )
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect()
@@ -89,7 +94,8 @@ class SettingsViewModelTest {
         val viewModel = SettingsViewModel(
             settingsRepository = settingsRepository,
             authRepository = authRepository,
-            playbackTracker = playbackTracker
+            playbackTracker = playbackTracker,
+            lastFmClient = lastFmClient
         )
         runCurrent()
 
@@ -123,7 +129,8 @@ class SettingsViewModelTest {
         val viewModel = SettingsViewModel(
             settingsRepository = settingsRepository,
             authRepository = authRepository,
-            playbackTracker = playbackTracker
+            playbackTracker = playbackTracker,
+            lastFmClient = lastFmClient
         )
         runCurrent()
 
