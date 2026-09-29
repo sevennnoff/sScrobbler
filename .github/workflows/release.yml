@@ -1,0 +1,80 @@
+name: Build & Release
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (e.g. v1.0.1)'
+        required: true
+        default: 'v1.0.1'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Restore Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > sscrobbler.jks
+
+      - name: Run Unit Tests
+        run: ./gradlew testReleaseUnitTest
+
+      - name: Build Release APK
+        env:
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+        run: ./gradlew assembleRelease
+
+      - name: Prepare Artifact
+        id: prepare
+        run: |
+          TAG="${{ github.event.inputs.tag_name || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}"
+          if [ -z "$TAG" ]; then
+            TAG="v1.0.0-${GITHUB_SHA::7}"
+          fi
+          APK_NAME="sScrobbler-${TAG}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$APK_NAME"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "apk_name=$APK_NAME" >> $GITHUB_OUTPUT
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.prepare.outputs.apk_name }}
+          path: ${{ steps.prepare.outputs.apk_name }}
+          if-no-files-found: error
+
+      - name: Create or Update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.prepare.outputs.tag }}
+          name: ${{ steps.prepare.outputs.tag }}
+          files: ${{ steps.prepare.outputs.apk_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false

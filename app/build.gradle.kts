@@ -14,8 +14,10 @@ val localProperties = Properties().apply {
         localPropertiesFile.inputStream().use { load(it) }
     }
 }
-val lastfmApiKey = localProperties.getProperty("LASTFM_API_KEY") ?: ""
-val lastfmApiSecret = localProperties.getProperty("LASTFM_API_SECRET") ?: ""
+val lastfmApiKey = localProperties.getProperty("LASTFM_API_KEY")
+    ?: System.getenv("LASTFM_API_KEY") ?: ""
+val lastfmApiSecret = localProperties.getProperty("LASTFM_API_SECRET")
+    ?: System.getenv("LASTFM_API_SECRET") ?: ""
 
 android {
     namespace = "com.sscrobbler.app"
