@@ -17,8 +17,8 @@ import okhttp3.Request
 import java.io.IOException
 
 open class LastFmClient(
-    private val apiKey: String = BuildConfig.LASTFM_API_KEY,
-    private val apiSecret: String = BuildConfig.LASTFM_API_SECRET,
+    private val apiKey: String = com.sscrobbler.app.util.Secrets.getApiKey(),
+    private val apiSecret: String = com.sscrobbler.app.util.Secrets.getApiSecret(),
     private val okHttpClient: OkHttpClient? = null,
     private val baseUrl: String = "https://ws.audioscrobbler.com/2.0/"
 ) {

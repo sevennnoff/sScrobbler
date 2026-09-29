@@ -33,6 +33,7 @@ sealed interface LastFmAuthState {
 data class OnboardingUiState(
     val currentStep: Int = 0,
     val isNotificationAccessGranted: Boolean = false,
+    val isBatteryOptimizationIgnored: Boolean = false,
     val authState: LastFmAuthState = LastFmAuthState.Idle,
     val isCompleted: Boolean = false
 )
@@ -45,16 +46,25 @@ class OnboardingViewModel(
 
     private val _currentStep = MutableStateFlow(0)
     private val _notificationGranted = MutableStateFlow(false)
+    private val _batteryIgnored = MutableStateFlow(false)
     private val _authState = MutableStateFlow<LastFmAuthState>(LastFmAuthState.Idle)
     private var currentToken: String? = null
 
     val uiState: StateFlow<OnboardingUiState> = combine(
         _currentStep,
         _notificationGranted,
+        _batteryIgnored,
         _authState,
         authRepository.usernameFlow,
         settingsRepository.isOnboardingCompletedFlow
-    ) { step, notif, auth, savedUser, completed ->
+    ) { args: Array<Any?> ->
+        val step = args[0] as Int
+        val notif = args[1] as Boolean
+        val battery = args[2] as Boolean
+        val auth = args[3] as LastFmAuthState
+        val savedUser = args[4] as? String
+        val completed = args[5] as Boolean
+
         val effectiveAuth = if (!savedUser.isNullOrBlank() && auth !is LastFmAuthState.Connected) {
             LastFmAuthState.Connected(savedUser)
         } else {
@@ -63,6 +73,7 @@ class OnboardingViewModel(
         OnboardingUiState(
             currentStep = step,
             isNotificationAccessGranted = notif,
+            isBatteryOptimizationIgnored = battery,
             authState = effectiveAuth,
             isCompleted = completed
         )
@@ -99,6 +110,31 @@ class OnboardingViewModel(
         _notificationGranted.value = granted
     }
 
+    fun checkBatteryOptimization(context: Context) {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+        _batteryIgnored.value = pm?.isIgnoringBatteryOptimizations(context.packageName) ?: false
+    }
+
+    fun requestIgnoreBatteryOptimization(context: Context) {
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            data = Uri.parse("package:${context.packageName}")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            val fallback = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(fallback)
+        }
+    }
+
+    fun checkAllPermissions(context: Context) {
+        checkNotificationAccess(context)
+        checkBatteryOptimization(context)
+    }
+
     fun openNotificationSettings(context: Context) {
         val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -115,7 +151,7 @@ class OnboardingViewModel(
                     currentToken = token
                     _authState.value = LastFmAuthState.WaitingForBrowser(token)
 
-                    val authUrl = "https://www.last.fm/api/auth/?api_key=${BuildConfig.LASTFM_API_KEY}&token=$token"
+                    val authUrl = "https://www.last.fm/api/auth/?api_key=${com.sscrobbler.app.util.Secrets.getApiKey()}&token=$token"
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }

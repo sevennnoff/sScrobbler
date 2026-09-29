@@ -31,9 +31,6 @@ android {
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        buildConfigField("String", "LASTFM_API_KEY", "\"$lastfmApiKey\"")
-        buildConfigField("String", "LASTFM_API_SECRET", "\"$lastfmApiSecret\"")
     }
 
     signingConfigs {

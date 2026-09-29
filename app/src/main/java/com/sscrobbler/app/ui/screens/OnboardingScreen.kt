@@ -11,6 +11,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,6 +25,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.BatteryAlert
+import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.GraphicEq
@@ -115,12 +118,16 @@ fun OnboardingScreen(
                         onNext = { viewModel.nextStep() }
                     )
                     1 -> OnboardingStep2Permissions(
-                        isGranted = state.isNotificationAccessGranted,
-                        onGrant = {
+                        isNotificationGranted = state.isNotificationAccessGranted,
+                        isBatteryIgnored = state.isBatteryOptimizationIgnored,
+                        onGrantNotification = {
                             viewModel.openNotificationSettings(context)
                         },
+                        onGrantBattery = {
+                            viewModel.requestIgnoreBatteryOptimization(context)
+                        },
                         onCheck = {
-                            viewModel.checkNotificationAccess(context)
+                            viewModel.checkAllPermissions(context)
                         },
                         onNext = { viewModel.nextStep() },
                         onBack = { viewModel.prevStep() }
@@ -292,16 +299,22 @@ fun ValuePropRow(title: String, desc: String) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Step 2: Notification Access Permission
+// Step 2: Permissions & Background Activity
 // ─────────────────────────────────────────────────────────────
 @Composable
 fun OnboardingStep2Permissions(
-    isGranted: Boolean,
-    onGrant: () -> Unit,
+    isNotificationGranted: Boolean,
+    isBatteryIgnored: Boolean,
+    onGrantNotification: () -> Unit,
+    onGrantBattery: () -> Unit,
     onCheck: () -> Unit,
     onNext: () -> Unit,
     onBack: () -> Unit
 ) {
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        onCheck()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -311,87 +324,159 @@ fun OnboardingStep2Permissions(
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(20.dp),
-            modifier = Modifier.padding(top = 20.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.padding(top = 16.dp)
         ) {
+            val allGood = isNotificationGranted && isBatteryIgnored
             Surface(
-                modifier = Modifier.size(110.dp),
+                modifier = Modifier.size(96.dp),
                 shape = CircleShape,
-                color = if (isGranted) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                color = if (allGood) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
                 shadowElevation = 6.dp
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = if (isGranted) Icons.Default.CheckCircle else Icons.Default.NotificationsActive,
+                        imageVector = if (allGood) Icons.Default.CheckCircle else Icons.Default.NotificationsActive,
                         contentDescription = null,
-                        tint = if (isGranted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(56.dp)
+                        tint = if (allGood) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(48.dp)
                     )
                 }
             }
 
             Text(
-                text = "Notification Access",
+                text = "Permissions & Background",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center
             )
 
             Text(
-                text = "Android requires Notification Listener access so sScrobbler can detect active playback and read track metadata from your players.",
+                text = "sScrobbler needs notification access to capture playing music, and unrestricted battery access so Android doesn't kill the scrobbler service in the background.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
 
+            // Card 1: Notification Access (Required)
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = CardShape,
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Icon(
-                            imageVector = if (isGranted) Icons.Default.CheckCircle else Icons.Default.Warning,
-                            contentDescription = null,
-                            tint = if (isGranted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-                        )
-                        Text(
-                            text = if (isGranted) "Permission Granted" else "Permission Missing",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = if (isNotificationGranted) Icons.Default.CheckCircle else Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = if (isNotificationGranted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                            )
+                            Column {
+                                Text(
+                                    text = "Notification Access",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = if (isNotificationGranted) "Active • Captures music sessions" else "Required • Missing permission",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (isNotificationGranted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
 
-                    TextButton(onClick = onCheck) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Check",
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Check")
+                        if (!isNotificationGranted) {
+                            Button(
+                                onClick = onGrantNotification,
+                                shape = PillShape,
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                            ) {
+                                Text("Enable")
+                            }
+                        }
                     }
                 }
             }
 
-            if (!isGranted) {
-                Button(
-                    onClick = onGrant,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = PillShape
+            // Card 2: Unrestricted Battery (Recommended)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = CardShape,
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("Enable in System Settings")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = if (isBatteryIgnored) Icons.Default.BatteryChargingFull else Icons.Default.BatteryAlert,
+                                contentDescription = null,
+                                tint = if (isBatteryIgnored) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
+                            )
+                            Column {
+                                Text(
+                                    text = "Unrestricted Battery",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = if (isBatteryIgnored) "Unrestricted • Will not be killed" else "Recommended • Avoid background sleep",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (isBatteryIgnored) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        if (!isBatteryIgnored) {
+                            OutlinedButton(
+                                onClick = onGrantBattery,
+                                shape = PillShape,
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                            ) {
+                                Text("Allow")
+                            }
+                        }
+                    }
                 }
+            }
+
+            TextButton(
+                onClick = onCheck,
+                modifier = Modifier.align(Alignment.End)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Refresh status")
             }
         }
 
@@ -413,7 +498,7 @@ fun OnboardingStep2Permissions(
                 modifier = Modifier.weight(1f),
                 shape = PillShape
             ) {
-                Text(if (isGranted) "Continue" else "Skip for now")
+                Text(if (isNotificationGranted) "Continue" else "Skip for now")
             }
         }
     }
