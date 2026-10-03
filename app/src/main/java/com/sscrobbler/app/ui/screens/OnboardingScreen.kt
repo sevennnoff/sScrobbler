@@ -136,6 +136,8 @@ fun OnboardingScreen(
                         authState = state.authState,
                         onStartAuth = { viewModel.startBrowserAuth(context) },
                         onConfirmAuth = { viewModel.confirmBrowserAuth() },
+                        onCancelAuth = { viewModel.cancelAuth() },
+                        onDisconnect = { viewModel.disconnect() },
                         onComplete = {
                             viewModel.completeOnboarding()
                             onFinished()
@@ -512,6 +514,8 @@ fun OnboardingStep3Auth(
     authState: LastFmAuthState,
     onStartAuth: () -> Unit,
     onConfirmAuth: () -> Unit,
+    onCancelAuth: () -> Unit,
+    onDisconnect: () -> Unit,
     onComplete: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -565,10 +569,17 @@ fun OnboardingStep3Auth(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
                     )
+                    OutlinedButton(
+                        onClick = onDisconnect,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = PillShape
+                    ) {
+                        Text("Switch / Change Account")
+                    }
                 }
                 is LastFmAuthState.WaitingForBrowser -> {
                     Text(
-                        text = "Please approve authorization in your browser, then tap 'I've Authorized' below.",
+                        text = "Please approve authorization in your browser, then tap 'Confirm Login' below.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
@@ -578,19 +589,31 @@ fun OnboardingStep3Auth(
                         modifier = Modifier.fillMaxWidth(),
                         shape = PillShape
                     ) {
-                        Text("I've Authorized in Browser")
-                    }
-                    OutlinedButton(
-                        onClick = onStartAuth,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = PillShape
-                    ) {
-                        Icon(Icons.Default.OpenInBrowser, contentDescription = null)
+                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Reopen Browser Page")
+                        Text("Confirm Login")
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onStartAuth,
+                            modifier = Modifier.weight(1f),
+                            shape = PillShape
+                        ) {
+                            Text("Reopen Browser", style = MaterialTheme.typography.labelSmall)
+                        }
+                        androidx.compose.material3.TextButton(
+                            onClick = onCancelAuth,
+                            modifier = Modifier.weight(1f),
+                            shape = PillShape
+                        ) {
+                            Text("Cancel", style = MaterialTheme.typography.labelSmall)
+                        }
                     }
                 }
-                is LastFmAuthState.LoadingToken, LastFmAuthState.FetchingSession -> {
+                is LastFmAuthState.LoadingToken, is LastFmAuthState.FetchingSession -> {
                     CircularProgressIndicator(modifier = Modifier.size(36.dp))
                     Text(
                         text = "Connecting with Last.fm...",
@@ -605,12 +628,24 @@ fun OnboardingStep3Auth(
                         color = MaterialTheme.colorScheme.error,
                         textAlign = TextAlign.Center
                     )
-                    Button(
-                        onClick = onStartAuth,
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                        shape = PillShape
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("Try Again in Browser")
+                        Button(
+                            onClick = onStartAuth,
+                            modifier = Modifier.weight(1f),
+                            shape = PillShape
+                        ) {
+                            Text("Try Again")
+                        }
+                        OutlinedButton(
+                            onClick = onCancelAuth,
+                            modifier = Modifier.weight(1f),
+                            shape = PillShape
+                        ) {
+                            Text("Cancel")
+                        }
                     }
                 }
                 LastFmAuthState.Idle -> {

@@ -65,7 +65,7 @@ class OnboardingViewModel(
         val savedUser = args[4] as? String
         val completed = args[5] as Boolean
 
-        val effectiveAuth = if (!savedUser.isNullOrBlank() && auth !is LastFmAuthState.Connected) {
+        val effectiveAuth = if (auth is LastFmAuthState.Idle && !savedUser.isNullOrBlank()) {
             LastFmAuthState.Connected(savedUser)
         } else {
             auth
@@ -185,10 +185,28 @@ class OnboardingViewModel(
                     _authState.value = LastFmAuthState.Connected(session.name)
                 }
                 is LastFmResult.Error -> {
-                    _authState.value = LastFmAuthState.Error("Authorization not confirmed: ${res.message}")
+                    val msg = if (res.code == 4 || res.code == 14) {
+                        "Token not approved yet. Please tap 'Allow access' in your browser first."
+                    } else {
+                        res.message
+                    }
+                    _authState.value = LastFmAuthState.Error(msg)
                 }
             }
         }
+    }
+
+    fun disconnect() {
+        viewModelScope.launch {
+            authRepository.clearSession()
+            currentToken = null
+            _authState.value = LastFmAuthState.Idle
+        }
+    }
+
+    fun cancelAuth() {
+        currentToken = null
+        _authState.value = LastFmAuthState.Idle
     }
 
     fun completeOnboarding() {

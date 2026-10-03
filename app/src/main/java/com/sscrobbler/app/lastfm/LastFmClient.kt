@@ -1,6 +1,5 @@
 package com.sscrobbler.app.lastfm
 
-import com.sscrobbler.app.BuildConfig
 import com.sscrobbler.app.database.PendingScrobbleEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +30,114 @@ open class LastFmClient(
         okHttpClient ?: OkHttpClient()
     }
 
+    private val _connectionErrorFlow = MutableStateFlow<String?>(null)
+    open val connectionErrorFlow: StateFlow<String?> = _connectionErrorFlow.asStateFlow()
+
+    private fun parseLastFmError(body: String, httpCode: Int): LastFmResult.Error {
+        val trimmed = body.trim()
+        if (trimmed.startsWith("{")) {
+            try {
+                val elem = json.parseToJsonElement(trimmed).jsonObject
+                val code = elem["error"]?.jsonPrimitive?.content?.toIntOrNull()
+                val msg = elem["message"]?.jsonPrimitive?.content
+                if (msg != null || code != null) {
+                    val userFriendlyMsg = when (code) {
+                        4, 14 -> "Token not yet approved. Please tap 'Allow access' in your browser first."
+                        9 -> "Invalid Last.fm session. Please log in again."
+                        10 -> "Invalid API Key."
+                        11, 16 -> "Last.fm service is temporarily unavailable. Please try again later."
+                        26 -> "API Key suspended."
+                        else -> msg ?: "Last.fm error (code $code)"
+                    }
+                    return LastFmResult.Error(code, userFriendlyMsg)
+                }
+            } catch (_: Exception) {}
+        }
+
+        // Check XML error <error code="4">Unauthorized Token</error>
+        val xmlMatch = Regex("""<error\s+code="?(\d+)"?>([^<]+)</error>""").find(trimmed)
+        if (xmlMatch != null) {
+            val code = xmlMatch.groupValues[1].toIntOrNull()
+            val msg = xmlMatch.groupValues[2].trim()
+            val userFriendlyMsg = when (code) {
+                4, 14 -> "Token not yet approved. Please tap 'Allow access' in your browser first."
+                9 -> "Invalid Last.fm session. Please log in again."
+                else -> msg
+            }
+            return LastFmResult.Error(code, userFriendlyMsg)
+        }
+
+        // Check HTML / Cloudflare
+        if (trimmed.contains("<html", ignoreCase = true) || trimmed.contains("<!doctype", ignoreCase = true)) {
+            val isCloudflare = trimmed.contains("cloudflare", ignoreCase = true) || trimmed.contains("just a moment", ignoreCase = true)
+            val msg = if (isCloudflare) {
+                "Last.fm is blocked by Cloudflare. Check your connection or disable VPN."
+            } else {
+                "Last.fm server error (HTTP $httpCode). Please check your internet or VPN."
+            }
+            return LastFmResult.Error(httpCode, msg)
+        }
+
+        if (trimmed.isBlank()) {
+            return LastFmResult.Error(httpCode, "Empty response from Last.fm (HTTP $httpCode)")
+        }
+
+        return LastFmResult.Error(httpCode, "Last.fm error (HTTP $httpCode)")
+    }
+
+    private fun <T> executePost(
+        params: Map<String, String>,
+        parser: (String, Int) -> LastFmResult<T>
+    ): LastFmResult<T> {
+        val formBuilder = FormBody.Builder()
+        params.forEach { (key, value) ->
+            formBuilder.add(key, value)
+        }
+        val url = if (baseUrl.contains("?")) "$baseUrl&format=json" else "$baseUrl?format=json"
+        val request = Request.Builder()
+            .url(url)
+            .post(formBuilder.build())
+            .build()
+
+        return try {
+            val response = client.newCall(request).execute()
+            val bodyString = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                _connectionErrorFlow.value = "Last.fm error (HTTP ${response.code})"
+            } else {
+                _connectionErrorFlow.value = null
+            }
+            parser(bodyString, response.code)
+        } catch (e: IOException) {
+            _connectionErrorFlow.value = "Cannot reach Last.fm (check VPN / network)"
+            LastFmResult.Error(null, "Network error: ${e.message}", e)
+        } catch (e: Exception) {
+            _connectionErrorFlow.value = "Cannot reach Last.fm (check VPN / network)"
+            LastFmResult.Error(null, "Request failed: ${e.message}", e)
+        }
+    }
+
+    private fun checkError(responseBody: String, httpCode: Int): LastFmResult<Unit> {
+        val trimmed = responseBody.trim()
+        if (trimmed.startsWith("{")) {
+            try {
+                val element = json.parseToJsonElement(trimmed)
+                val obj = element.jsonObject
+                if (obj.containsKey("error")) {
+                    val err = parseLastFmError(trimmed, httpCode)
+                    return LastFmResult.Error(err.code, err.message)
+                } else {
+                    return LastFmResult.Success(Unit)
+                }
+            } catch (_: Exception) {}
+        }
+        if (httpCode in 200..299 && !trimmed.contains("<error")) {
+            return LastFmResult.Success(Unit)
+        }
+        val err = parseLastFmError(trimmed, httpCode)
+        return LastFmResult.Error(err.code, err.message)
+    }
+
     open suspend fun getToken(): LastFmResult<String> = withContext(Dispatchers.IO) {
         val params = mutableMapOf(
             "method" to "auth.getToken",
@@ -40,13 +147,17 @@ open class LastFmClient(
         params["api_sig"] = sig
         params["format"] = "json"
 
-        executePost(params) { responseBody ->
-            val parsed = json.decodeFromString<LastFmTokenResponse>(responseBody)
-            if (parsed.token != null) {
-                LastFmResult.Success(parsed.token)
-            } else {
-                LastFmResult.Error(parsed.error, parsed.message ?: "Failed to get token")
+        executePost(params) { responseBody, httpCode ->
+            val trimmed = responseBody.trim()
+            if (trimmed.startsWith("{")) {
+                try {
+                    val parsed = json.decodeFromString<LastFmTokenResponse>(trimmed)
+                    if (!parsed.token.isNullOrBlank()) {
+                        return@executePost LastFmResult.Success(parsed.token)
+                    }
+                } catch (_: Exception) {}
             }
+            parseLastFmError(trimmed, httpCode)
         }
     }
 
@@ -60,13 +171,17 @@ open class LastFmClient(
         params["api_sig"] = sig
         params["format"] = "json"
 
-        executePost(params) { responseBody ->
-            val parsed = json.decodeFromString<LastFmSessionResponse>(responseBody)
-            if (parsed.session != null) {
-                LastFmResult.Success(parsed.session)
-            } else {
-                LastFmResult.Error(parsed.error, parsed.message ?: "Failed to get session")
+        executePost(params) { responseBody, httpCode ->
+            val trimmed = responseBody.trim()
+            if (trimmed.startsWith("{")) {
+                try {
+                    val parsed = json.decodeFromString<LastFmSessionResponse>(trimmed)
+                    if (parsed.session != null) {
+                        return@executePost LastFmResult.Success(parsed.session)
+                    }
+                } catch (_: Exception) {}
             }
+            parseLastFmError(trimmed, httpCode)
         }
     }
 
@@ -93,8 +208,8 @@ open class LastFmClient(
         params["api_sig"] = sig
         params["format"] = "json"
 
-        executePost(params) { responseBody ->
-            checkError(responseBody)
+        executePost(params) { responseBody, httpCode ->
+            checkError(responseBody, httpCode)
         }
     }
 
@@ -123,8 +238,8 @@ open class LastFmClient(
         params["api_sig"] = sig
         params["format"] = "json"
 
-        executePost(params) { responseBody ->
-            checkError(responseBody)
+        executePost(params) { responseBody, httpCode ->
+            checkError(responseBody, httpCode)
         }
     }
 
@@ -154,58 +269,8 @@ open class LastFmClient(
         params["api_sig"] = sig
         params["format"] = "json"
 
-        executePost(params) { responseBody ->
-            checkError(responseBody)
-        }
-    }
-
-    private fun checkError(responseBody: String): LastFmResult<Unit> {
-        return try {
-            val element = json.parseToJsonElement(responseBody)
-            val obj = element.jsonObject
-            if (obj.containsKey("error")) {
-                val errorCode = obj["error"]?.jsonPrimitive?.content?.toIntOrNull()
-                val message = obj["message"]?.jsonPrimitive?.content ?: "Unknown Last.fm error"
-                LastFmResult.Error(errorCode, message)
-            } else {
-                LastFmResult.Success(Unit)
-            }
-        } catch (e: Exception) {
-            LastFmResult.Error(null, "Failed to parse Last.fm response", e)
-        }
-    }
-
-    private val _connectionErrorFlow = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
-    open val connectionErrorFlow: kotlinx.coroutines.flow.StateFlow<String?> = _connectionErrorFlow.asStateFlow()
-
-    private fun <T> executePost(
-        params: Map<String, String>,
-        parser: (String) -> LastFmResult<T>
-    ): LastFmResult<T> {
-        val formBuilder = FormBody.Builder()
-        params.forEach { (key, value) ->
-            formBuilder.add(key, value)
-        }
-        val request = Request.Builder()
-            .url(baseUrl)
-            .post(formBuilder.build())
-            .build()
-
-        return try {
-            val response = client.newCall(request).execute()
-            val bodyString = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                _connectionErrorFlow.value = "Last.fm error (HTTP ${response.code})"
-            } else {
-                _connectionErrorFlow.value = null
-            }
-            parser(bodyString)
-        } catch (e: IOException) {
-            _connectionErrorFlow.value = "Cannot reach Last.fm (check VPN / network)"
-            LastFmResult.Error(null, "Network error: ${e.message}", e)
-        } catch (e: Exception) {
-            _connectionErrorFlow.value = "Cannot reach Last.fm (check VPN / network)"
-            LastFmResult.Error(null, "Request failed: ${e.message}", e)
+        executePost(params) { responseBody, httpCode ->
+            checkError(responseBody, httpCode)
         }
     }
 
@@ -221,7 +286,9 @@ open class LastFmClient(
             val url = "$baseUrl?method=track.getInfo&api_key=$apiKey&artist=${java.net.URLEncoder.encode(artist, "UTF-8")}&track=${java.net.URLEncoder.encode(track, "UTF-8")}&format=json"
             val request = Request.Builder().url(url).build()
             val response = client.newCall(request).execute()
-            val body = response.body?.string().orEmpty()
+            val body = response.body?.string().orEmpty().trim()
+            if (!response.isSuccessful || !body.startsWith("{")) return@withContext null
+
             val element = json.parseToJsonElement(body).jsonObject
             val trackObj = element["track"]?.jsonObject ?: return@withContext null
             val albumObj = trackObj["album"]?.jsonObject
@@ -236,7 +303,7 @@ open class LastFmClient(
                 }
                 return@withContext bigUrl
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Ignored
         }
         null
@@ -247,10 +314,11 @@ open class LastFmClient(
             val url = "$baseUrl?method=user.getRecentTracks&user=${java.net.URLEncoder.encode(user, "UTF-8")}&api_key=$apiKey&limit=$limit&format=json"
             val request = Request.Builder().url(url).build()
             val response = client.newCall(request).execute()
-            val body = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                _connectionErrorFlow.value = "Last.fm error (HTTP ${response.code})"
-                return@withContext LastFmResult.Error(response.code, "HTTP ${response.code}")
+            val body = response.body?.string().orEmpty().trim()
+            if (!response.isSuccessful || !body.startsWith("{")) {
+                val err = parseLastFmError(body, response.code)
+                _connectionErrorFlow.value = err.message
+                return@withContext LastFmResult.Error(err.code, err.message)
             }
             _connectionErrorFlow.value = null
             val root = json.parseToJsonElement(body).jsonObject
@@ -313,7 +381,8 @@ open class LastFmClient(
             }
             LastFmResult.Success(list)
         } catch (e: Exception) {
-            LastFmResult.Error(null, "Failed to load recent tracks: ${e.message}", e)
+            val err = parseLastFmError(e.message.orEmpty(), -1)
+            LastFmResult.Error(err.code, "Failed to load recent tracks: ${e.message}", e)
         }
     }
 
@@ -322,7 +391,9 @@ open class LastFmClient(
             val url = "$baseUrl?method=user.getInfo&user=${java.net.URLEncoder.encode(username, "UTF-8")}&api_key=$apiKey&format=json"
             val request = Request.Builder().url(url).build()
             val response = client.newCall(request).execute()
-            val body = response.body?.string().orEmpty()
+            val body = response.body?.string().orEmpty().trim()
+            if (!response.isSuccessful || !body.startsWith("{")) return@withContext null
+
             val element = json.parseToJsonElement(body).jsonObject
             val userObj = element["user"]?.jsonObject ?: return@withContext null
             val imageArray = userObj["image"]?.let {
@@ -332,7 +403,7 @@ open class LastFmClient(
             if (!rawUrl.isNullOrBlank()) {
                 return@withContext rawUrl.replace(Regex("/u/\\d+x\\d+/"), "/u/300x300/")
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Ignored
         }
         null

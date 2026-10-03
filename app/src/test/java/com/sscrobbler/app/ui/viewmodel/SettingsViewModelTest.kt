@@ -139,4 +139,30 @@ class SettingsViewModelTest {
 
         coVerify(exactly = 1) { authRepository.clearSession() }
     }
+
+    @Test
+    fun testConfirmBrowserAuthSuccess() = runTest(testDispatcher) {
+        val viewModel = SettingsViewModel(
+            settingsRepository = settingsRepository,
+            authRepository = authRepository,
+            playbackTracker = playbackTracker,
+            lastFmClient = lastFmClient
+        )
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect()
+        }
+        runCurrent()
+
+        coEvery { lastFmClient.getSession("test_token") } returns com.sscrobbler.app.lastfm.LastFmResult.Success(
+            com.sscrobbler.app.lastfm.LastFmSession("new_user", "new_session_key")
+        )
+        coEvery { lastFmClient.getUserAvatarUrl("new_user") } returns "https://avatar.url/img.png"
+
+        viewModel.confirmBrowserAuth("test_token")
+        runCurrent()
+
+        coVerify(exactly = 1) { authRepository.saveSession("new_user", "new_session_key") }
+        coVerify(exactly = 1) { authRepository.saveAvatarUrl("https://avatar.url/img.png") }
+        assertEquals(LastFmAuthState.Idle, viewModel.uiState.value.authState)
+    }
 }

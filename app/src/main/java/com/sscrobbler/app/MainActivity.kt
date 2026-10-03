@@ -112,6 +112,7 @@ class MainActivity : ComponentActivity() {
         if (data.scheme == "sscrobbler" && data.host == "auth") {
             val token = data.getQueryParameter("token")
             onboardingViewModel.confirmBrowserAuth(token)
+            settingsViewModel.confirmBrowserAuth(token)
         }
     }
 }

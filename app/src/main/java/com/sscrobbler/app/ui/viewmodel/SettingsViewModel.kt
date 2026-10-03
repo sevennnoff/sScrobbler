@@ -38,6 +38,7 @@ data class SettingsUiState(
     val isLoggedIn: Boolean = false,
     val username: String? = null,
     val avatarUrl: String? = null,
+    val authState: LastFmAuthState = LastFmAuthState.Idle,
     val minListenedPercent: Int = 50,
     val maxRequiredTimeMs: Long = 240_000L,
     val minTrackDurationMs: Long = 30_000L,
@@ -58,6 +59,8 @@ class SettingsViewModel(
 
     private val permissionStateFlow = MutableStateFlow(Pair(false, false))
     private val scannedAppsFlow = MutableStateFlow<Map<String, AppSourceItem>>(emptyMap())
+    private val _authFlowState = MutableStateFlow<LastFmAuthState>(LastFmAuthState.Idle)
+    private var pendingAuthToken: String? = null
     private var hasScanned = false
 
     private val knownMusicPackages = setOf(
@@ -107,7 +110,8 @@ class SettingsViewModel(
         settingsRepository.settingsFlow,
         playbackTracker?.discoveredPackagesFlow ?: MutableStateFlow<Set<String>>(emptySet()),
         permissionStateFlow,
-        scannedAppsFlow
+        scannedAppsFlow,
+        _authFlowState
     ) { args: Array<Any?> ->
         val username = args[0] as? String
         val isLoggedIn = (args[1] as? Boolean) ?: false
@@ -118,6 +122,7 @@ class SettingsViewModel(
         val hasNotif = (perms?.first as? Boolean) ?: false
         val hasBattery = (perms?.second as? Boolean) ?: false
         val scannedMap = (args[6] as? Map<*, *>)?.filterKeys { it is String }?.mapKeys { it.key as String }?.mapValues { it.value as AppSourceItem } ?: emptyMap()
+        val authFlow = (args[7] as? LastFmAuthState) ?: LastFmAuthState.Idle
 
         // Only show packages that are in scannedMap or have actively produced MediaSessions
         val combinedKeys = (scannedMap.keys + discoveredPackages)
@@ -149,6 +154,7 @@ class SettingsViewModel(
             isLoggedIn = isLoggedIn,
             username = username,
             avatarUrl = avatarUrl,
+            authState = authFlow,
             minListenedPercent = settings.minListenedPercent,
             maxRequiredTimeMs = settings.maxRequiredTimeMs,
             minTrackDurationMs = settings.minTrackDurationMs,
@@ -343,9 +349,72 @@ class SettingsViewModel(
         }
     }
 
+    fun startBrowserAuth(context: Context) {
+        viewModelScope.launch {
+            _authFlowState.value = LastFmAuthState.LoadingToken
+            when (val res = lastFmClient.getToken()) {
+                is com.sscrobbler.app.lastfm.LastFmResult.Success -> {
+                    val token = res.data
+                    pendingAuthToken = token
+                    _authFlowState.value = LastFmAuthState.WaitingForBrowser(token)
+                    val authUrl = "https://www.last.fm/api/auth/?api_key=${com.sscrobbler.app.util.Secrets.getApiKey()}&token=$token"
+                    try {
+                        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(authUrl)).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(intent)
+                    } catch (e: Exception) {
+                        _authFlowState.value = LastFmAuthState.Error("Could not open browser: ${e.message}")
+                    }
+                }
+                is com.sscrobbler.app.lastfm.LastFmResult.Error -> {
+                    _authFlowState.value = LastFmAuthState.Error(res.message)
+                }
+            }
+        }
+    }
+
+    fun confirmBrowserAuth(tokenOverride: String? = null) {
+        val token = tokenOverride ?: pendingAuthToken
+        if (token.isNullOrBlank()) {
+            _authFlowState.value = LastFmAuthState.Error("No token found. Please start login again.")
+            return
+        }
+        viewModelScope.launch {
+            _authFlowState.value = LastFmAuthState.FetchingSession
+            when (val res = lastFmClient.getSession(token)) {
+                is com.sscrobbler.app.lastfm.LastFmResult.Success -> {
+                    val session = res.data
+                    authRepository.saveSession(session.name, session.key)
+                    pendingAuthToken = null
+                    _authFlowState.value = LastFmAuthState.Idle
+                    val avatar = lastFmClient.getUserAvatarUrl(session.name)
+                    if (!avatar.isNullOrBlank()) {
+                        authRepository.saveAvatarUrl(avatar)
+                    }
+                }
+                is com.sscrobbler.app.lastfm.LastFmResult.Error -> {
+                    val msg = if (res.code == 4 || res.code == 14) {
+                        "Token not approved yet. Please tap 'Allow access' in your browser first."
+                    } else {
+                        res.message
+                    }
+                    _authFlowState.value = LastFmAuthState.Error(msg)
+                }
+            }
+        }
+    }
+
+    fun cancelBrowserAuth() {
+        pendingAuthToken = null
+        _authFlowState.value = LastFmAuthState.Idle
+    }
+
     fun disconnectLastFm() {
         viewModelScope.launch {
             authRepository.clearSession()
+            pendingAuthToken = null
+            _authFlowState.value = LastFmAuthState.Idle
         }
     }
 

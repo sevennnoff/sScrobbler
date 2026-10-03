@@ -1,6 +1,7 @@
 package com.sscrobbler.app.ui.screens
 
 import android.content.Context
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,12 +16,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Notifications
@@ -32,6 +35,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -40,6 +44,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -53,8 +58,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.sscrobbler.app.ui.theme.CardShape
+import com.sscrobbler.app.ui.theme.CardShape
 import com.sscrobbler.app.ui.theme.ChipShape
 import com.sscrobbler.app.ui.theme.PillShape
+import com.sscrobbler.app.ui.viewmodel.LastFmAuthState
 import com.sscrobbler.app.ui.viewmodel.SettingsUiState
 import com.sscrobbler.app.ui.viewmodel.SettingsViewModel
 
@@ -89,7 +96,9 @@ fun SettingsScreen(
         // 1. Last.fm Account Card
         LastFmAccountCard(
             state = state,
-            onReconnect = onNavigateToLogin,
+            onStartAuth = { viewModel.startBrowserAuth(context) },
+            onConfirmAuth = { viewModel.confirmBrowserAuth() },
+            onCancelAuth = { viewModel.cancelBrowserAuth() },
             onDisconnect = { viewModel.disconnectLastFm() }
         )
 
@@ -117,7 +126,9 @@ fun SettingsScreen(
 @Composable
 fun LastFmAccountCard(
     state: SettingsUiState,
-    onReconnect: () -> Unit,
+    onStartAuth: () -> Unit,
+    onConfirmAuth: () -> Unit,
+    onCancelAuth: () -> Unit,
     onDisconnect: () -> Unit
 ) {
     Card(
@@ -194,33 +205,140 @@ fun LastFmAccountCard(
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                if (state.isLoggedIn) {
-                    OutlinedButton(
-                        onClick = onReconnect,
-                        modifier = Modifier.weight(1f),
-                        shape = PillShape
+            // Auth flow in-place states
+            when (val auth = state.authState) {
+                is LastFmAuthState.WaitingForBrowser -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                                RoundedCornerShape(16.dp)
+                            )
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text("Reconnect")
+                        Text(
+                            text = "Please tap 'Allow access' on Last.fm in your browser, then tap Confirm below.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Button(
+                            onClick = onConfirmAuth,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = PillShape
+                        ) {
+                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Confirm Login")
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = onStartAuth,
+                                modifier = Modifier.weight(1f),
+                                shape = PillShape
+                            ) {
+                                Text("Reopen Browser", style = MaterialTheme.typography.labelSmall)
+                            }
+                            TextButton(
+                                onClick = onCancelAuth,
+                                modifier = Modifier.weight(1f),
+                                shape = PillShape
+                            ) {
+                                Text("Cancel", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
                     }
-                    Button(
-                        onClick = onDisconnect,
-                        modifier = Modifier.weight(1f),
-                        shape = PillShape,
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                }
+                is LastFmAuthState.LoadingToken, is LastFmAuthState.FetchingSession -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Disconnect", color = MaterialTheme.colorScheme.onError)
+                        CircularProgressIndicator(modifier = Modifier.size(22.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = if (auth is LastFmAuthState.LoadingToken) "Requesting Last.fm login..." else "Confirming authorization...",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
                     }
-                } else {
-                    Button(
-                        onClick = onReconnect,
+                }
+                is LastFmAuthState.Error -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+                                RoundedCornerShape(16.dp)
+                            )
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = auth.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = onStartAuth,
+                                modifier = Modifier.weight(1f),
+                                shape = PillShape,
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                            ) {
+                                Text("Try Again")
+                            }
+                            OutlinedButton(
+                                onClick = onCancelAuth,
+                                modifier = Modifier.weight(1f),
+                                shape = PillShape
+                            ) {
+                                Text("Cancel")
+                            }
+                        }
+                    }
+                }
+                else -> {
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                        shape = PillShape
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Text("Connect Last.fm")
+                        if (state.isLoggedIn) {
+                            OutlinedButton(
+                                onClick = onStartAuth,
+                                modifier = Modifier.weight(1f),
+                                shape = PillShape
+                            ) {
+                                Text("Reconnect")
+                            }
+                            Button(
+                                onClick = onDisconnect,
+                                modifier = Modifier.weight(1f),
+                                shape = PillShape,
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                            ) {
+                                Text("Disconnect", color = MaterialTheme.colorScheme.onError)
+                            }
+                        } else {
+                            Button(
+                                onClick = onStartAuth,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = PillShape
+                            ) {
+                                Icon(Icons.Default.AccountCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Connect Last.fm")
+                            }
+                        }
                     }
                 }
             }
