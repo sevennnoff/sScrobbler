@@ -139,6 +139,9 @@ class PlaybackTracker(
     private val _artworkBitmapFlow = MutableStateFlow<Bitmap?>(null)
     val artworkBitmapFlow: StateFlow<Bitmap?> = _artworkBitmapFlow.asStateFlow()
 
+    private val _artworkUriFlow = MutableStateFlow<String?>(null)
+    val artworkUriFlow: StateFlow<String?> = _artworkUriFlow.asStateFlow()
+
     private val _discoveredPackagesFlow = MutableStateFlow<Set<String>>(emptySet())
     val discoveredPackagesFlow: StateFlow<Set<String>> = _discoveredPackagesFlow.asStateFlow()
 
@@ -162,6 +165,7 @@ class PlaybackTracker(
                         _isPlayingFlow.value = false
                         _positionFlow.value = 0L
                         _artworkBitmapFlow.value = null
+                        _artworkUriFlow.value = null
                         cancelPauseTimeout()
                     }
                 }
@@ -226,6 +230,7 @@ class PlaybackTracker(
                 _isPlayingFlow.value = false
                 _positionFlow.value = 0L
                 _artworkBitmapFlow.value = null
+                _artworkUriFlow.value = null
                 cancelPauseTimeout()
             }
         }
@@ -299,6 +304,7 @@ class PlaybackTracker(
                 _isPlayingFlow.value = false
                 _positionFlow.value = 0L
                 _artworkBitmapFlow.value = null
+                _artworkUriFlow.value = null
                 cancelPauseTimeout()
                 arbitrateActiveSession()
             }
@@ -345,6 +351,7 @@ class PlaybackTracker(
                     _isPlayingFlow.value = false
                     _positionFlow.value = 0L
                     _artworkBitmapFlow.value = null
+                    _artworkUriFlow.value = null
                     cancelPauseTimeout()
                     return@launch
                 }
@@ -374,14 +381,17 @@ class PlaybackTracker(
 
             if (activeSessionKey == pkg) {
                 if (newTrack != null && newTrack != activeTrack) {
-                    scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackChanged)
+                    val newBitmap = extractArtwork(metadata)
+                    val newUri = extractArtworkUri(metadata)
                     activeTrack = newTrack
                     _activeTrackFlow.value = newTrack
-                    _artworkBitmapFlow.value = extractArtwork(metadata)
+                    _artworkBitmapFlow.value = newBitmap
+                    _artworkUriFlow.value = newUri
                     lastObservedPositionMs = 0L
                     session.lastKnownPositionMs = 0L
                     _positionFlow.value = 0L
                     cancelPauseTimeout()
+                    scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackChanged)
                     scrobbleEngine.onTrackStarted(newTrack)
                     if (session.isPlaying()) {
                         _isPlayingFlow.value = true
@@ -389,7 +399,14 @@ class PlaybackTracker(
                         triggerNowPlaying(newTrack)
                     }
                 } else if (newTrack != null && newTrack == activeTrack) {
-                    _artworkBitmapFlow.value = extractArtwork(metadata)
+                    val newBitmap = extractArtwork(metadata)
+                    if (newBitmap != null) {
+                        _artworkBitmapFlow.value = newBitmap
+                    }
+                    val newUri = extractArtworkUri(metadata)
+                    if (!newUri.isNullOrBlank()) {
+                        _artworkUriFlow.value = newUri
+                    }
                     val pos = session.currentPosition()
                     val duration = newTrack.durationMs ?: 0L
                     if (duration > 0 && lastObservedPositionMs > (duration * 0.70) && pos < 5000L) {
@@ -439,6 +456,7 @@ class PlaybackTracker(
         activeTrack = track
         _activeTrackFlow.value = track
         _artworkBitmapFlow.value = extractArtwork(newSession.lastMetadata)
+        _artworkUriFlow.value = extractArtworkUri(newSession.lastMetadata)
 
         if (track != null) {
             scrobbleEngine.onTrackStarted(track)
@@ -564,6 +582,18 @@ class PlaybackTracker(
             metadata.getBitmap(MediaMetadata.METADATA_KEY_ART)
                 ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
                 ?: metadata.description?.iconBitmap
+        } catch (e: Throwable) {
+            null
+        }
+    }
+
+    fun extractArtworkUri(metadata: MediaMetadata?): String? {
+        if (metadata == null) return null
+        return try {
+            metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
+                ?: metadata.getString(MediaMetadata.METADATA_KEY_ART_URI)
+                ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI)
+                ?: metadata.description?.iconUri?.toString()
         } catch (e: Throwable) {
             null
         }

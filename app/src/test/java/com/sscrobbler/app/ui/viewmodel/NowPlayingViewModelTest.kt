@@ -50,6 +50,7 @@ class NowPlayingViewModelTest {
     private val currentSessionFlow = MutableStateFlow<PlaybackSession?>(null)
     private val settingsFlow = MutableStateFlow(AppSettings())
     private val artworkFlow = MutableStateFlow<android.graphics.Bitmap?>(null)
+    private val artworkUriFlow = MutableStateFlow<String?>(null)
     private val recentFlow = MutableStateFlow<List<HistoryItemEntity>>(emptyList())
 
     @Before
@@ -72,6 +73,7 @@ class NowPlayingViewModelTest {
         coEvery { scrobbleEngine.currentSessionFlow } returns currentSessionFlow
         coEvery { settingsRepository.settingsFlow } returns settingsFlow
         coEvery { playbackTracker.artworkBitmapFlow } returns artworkFlow
+        coEvery { playbackTracker.artworkUriFlow } returns artworkUriFlow
         coEvery { historyDao.getRecentFlow(1) } returns recentFlow
     }
 

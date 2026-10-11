@@ -149,23 +149,26 @@ fun ActiveTrackCard(state: NowPlayingUiState) {
         elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
-        if (state.artwork != null) {
-            val imageBitmap = androidx.compose.runtime.remember(state.artwork) { state.artwork.asImageBitmap() }
-            Image(
-                bitmap = imageBitmap,
-                contentDescription = "${track.title} artwork",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-        } else if (!state.lastFmArtworkUrl.isNullOrBlank()) {
-            coil.compose.AsyncImage(
-                model = state.lastFmArtworkUrl,
-                contentDescription = "${track.title} artwork",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-        } else {
-            ArtworkPlaceholder(title = track.title, artist = track.artist)
+        val artworkKey = "${track.artist}-${track.title}"
+        androidx.compose.runtime.key(artworkKey) {
+            if (state.artwork != null) {
+                val imageBitmap = androidx.compose.runtime.remember(state.artwork) { state.artwork.asImageBitmap() }
+                Image(
+                    bitmap = imageBitmap,
+                    contentDescription = "${track.title} artwork",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            } else if (!state.artworkUrl.isNullOrBlank()) {
+                coil.compose.AsyncImage(
+                    model = state.artworkUrl,
+                    contentDescription = "${track.title} artwork",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                ArtworkPlaceholder(title = track.title, artist = track.artist)
+            }
         }
     }
 

@@ -15,11 +15,13 @@ import com.sscrobbler.app.settings.AppSettings
 import com.sscrobbler.app.settings.SettingsRepository
 import com.sscrobbler.app.util.Clock
 import com.sscrobbler.app.util.SystemClockImpl
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 data class NowPlayingUiState(
@@ -34,6 +36,7 @@ data class NowPlayingUiState(
     val thresholdProgress: Float = 0f,
     val trackProgress: Float = 0f,
     val artwork: Bitmap? = null,
+    val artworkUrl: String? = null,
     val lastFmArtworkUrl: String? = null,
     val sourcePackage: String = "",
     val lastScrobbledTrack: HistoryItemEntity? = null,
@@ -72,6 +75,7 @@ class NowPlayingViewModel(
     private val lastScrobbledFlow = historyDao.getRecentFlow(1)
     private val lastFmArtworkFlow = MutableStateFlow<String?>(null)
     private var lastLookedUpTrack: Track? = null
+    private var artworkJob: Job? = null
 
     val uiState: StateFlow<NowPlayingUiState> = combine(
         playbackTracker.activeTrackFlow,
@@ -81,6 +85,7 @@ class NowPlayingViewModel(
         scrobbleEngine.currentSessionFlow,
         settingsRepository.settingsFlow,
         playbackTracker.artworkBitmapFlow,
+        playbackTracker.artworkUriFlow,
         lastScrobbledFlow,
         lastFmArtworkFlow,
         lastFmClient.connectionErrorFlow
@@ -91,10 +96,11 @@ class NowPlayingViewModel(
         val positionMs = (args[3] as? Long) ?: 0L
         val session = args[4] as? PlaybackSession
         val settings = (args[5] as? AppSettings) ?: AppSettings()
-        val artwork = args[6] as? Bitmap
-        val recentList = args[7] as? List<*>
-        val lastFmArtworkUrl = args[8] as? String
-        val connectionError = args[9] as? String
+        val artworkBitmap = args[6] as? Bitmap
+        val mediaUri = args[7] as? String
+        val recentList = args[8] as? List<*>
+        val lastFmArtwork = args[9] as? String
+        val connectionError = args[10] as? String
         val lastScrobbled = recentList?.firstOrNull() as? HistoryItemEntity
 
         val currentTrack = track ?: session?.track
@@ -103,18 +109,26 @@ class NowPlayingViewModel(
 
         if (currentTrack != null && currentTrack != lastLookedUpTrack) {
             lastLookedUpTrack = currentTrack
-            if (artwork == null) {
-                viewModelScope.launch {
-                    val art = lastFmClient.getTrackArtworkUrl(currentTrack.artist, currentTrack.title)
-                    lastFmArtworkFlow.value = art
+            artworkJob?.cancel()
+            lastFmArtworkFlow.value = null
+
+            // If neither direct Bitmap nor local Media Uri is provided by player, query Last.fm
+            if (artworkBitmap == null && mediaUri.isNullOrBlank()) {
+                val lookupTarget = currentTrack
+                artworkJob = viewModelScope.launch {
+                    val art = lastFmClient.getTrackArtworkUrl(lookupTarget.artist, lookupTarget.title)
+                    if (isActive && lastLookedUpTrack == lookupTarget) {
+                        lastFmArtworkFlow.value = art
+                    }
                 }
-            } else {
-                lastFmArtworkFlow.value = null
             }
         } else if (currentTrack == null) {
+            artworkJob?.cancel()
             lastLookedUpTrack = null
             lastFmArtworkFlow.value = null
         }
+
+        val effectiveArtworkUrl = if (!mediaUri.isNullOrBlank()) mediaUri else lastFmArtwork
 
         val thresholdMs = ScrobbleEngine.calculateThreshold(
             durationMs = durationMs,
@@ -141,8 +155,9 @@ class NowPlayingViewModel(
             minListenedPercent = settings.minListenedPercent,
             thresholdProgress = thresholdProgress,
             trackProgress = trackProgress,
-            artwork = artwork,
-            lastFmArtworkUrl = lastFmArtworkUrl,
+            artwork = artworkBitmap,
+            artworkUrl = effectiveArtworkUrl,
+            lastFmArtworkUrl = effectiveArtworkUrl,
             sourcePackage = currentTrack?.sourcePackage.orEmpty(),
             lastScrobbledTrack = lastScrobbled,
             connectionError = connectionError
