@@ -200,7 +200,7 @@ class PlaybackTracker(
         // Proactively check if player switched track without emitting onMetadataChanged
         val liveMeta = session.controller.metadata
         val liveTrack = extractTrack(liveMeta, activeKey)
-        if (liveTrack != null && liveTrack != activeTrack) {
+        if (liveTrack != null && !isSameTrack(liveTrack, activeTrack)) {
             handleMetadataChanged(session, liveMeta)
             return
         }
@@ -330,7 +330,7 @@ class PlaybackTracker(
                 // If controller metadata is ahead of activeTrack, route to metadata changed first
                 val liveMeta = session.controller.metadata ?: session.lastMetadata
                 val liveTrack = extractTrack(liveMeta, pkg)
-                if (liveTrack != null && liveTrack != activeTrack) {
+                if (liveTrack != null && !isSameTrack(liveTrack, activeTrack)) {
                     handleMetadataChanged(session, liveMeta)
                     return@launch
                 }
@@ -376,7 +376,7 @@ class PlaybackTracker(
 
                 if (isPlaying) {
                     cancelPauseTimeout()
-                    if (currentTrack != null && nowPlayingSentForTrack != currentTrack) {
+                    if (currentTrack != null && (nowPlayingSentForTrack == null || !isSameTrack(nowPlayingSentForTrack, currentTrack))) {
                         triggerNowPlaying(currentTrack)
                     }
                 } else {
@@ -397,7 +397,7 @@ class PlaybackTracker(
             val newTrack = extractTrack(metadata, pkg)
 
             if (activeSessionKey == pkg) {
-                if (newTrack != null && newTrack != activeTrack) {
+                if (newTrack != null && !isSameTrack(newTrack, activeTrack)) {
                     nowPlayingJob?.cancel()
                     nowPlayingSentForTrack = null
                     val newBitmap = extractArtwork(metadata)
@@ -417,7 +417,7 @@ class PlaybackTracker(
                         scrobbleEngine.onPlaybackStateChanged(true)
                         triggerNowPlaying(newTrack)
                     }
-                } else if (newTrack != null && newTrack == activeTrack) {
+                } else if (newTrack != null && isSameTrack(newTrack, activeTrack)) {
                     val newBitmap = extractArtwork(metadata)
                     if (newBitmap != null) {
                         _artworkBitmapFlow.value = newBitmap
@@ -426,8 +426,16 @@ class PlaybackTracker(
                     if (!newUri.isNullOrBlank()) {
                         _artworkUriFlow.value = newUri
                     }
+                    if (newTrack.durationMs != null && activeTrack?.durationMs == null) {
+                        activeTrack = activeTrack?.copy(durationMs = newTrack.durationMs)
+                        _activeTrackFlow.value = activeTrack
+                    }
+                    if (newTrack.album != null && activeTrack?.album == null) {
+                        activeTrack = activeTrack?.copy(album = newTrack.album)
+                        _activeTrackFlow.value = activeTrack
+                    }
                     val pos = session.currentPosition()
-                    val duration = newTrack.durationMs ?: 0L
+                    val duration = newTrack.durationMs ?: activeTrack?.durationMs ?: 0L
                     if (duration > 0 && lastObservedPositionMs > (duration * 0.70) && pos < 5000L) {
                         scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackRepeated)
                         nowPlayingSentForTrack = null
@@ -472,13 +480,15 @@ class PlaybackTracker(
         }
 
         activeSessionKey = newKey
-        val track = extractTrack(newSession.lastMetadata, newKey)
+        val meta = newSession.controller.metadata ?: newSession.lastMetadata
+        newSession.lastMetadata = meta
+        val track = extractTrack(meta, newKey)
         nowPlayingJob?.cancel()
         nowPlayingSentForTrack = null
         activeTrack = track
         _activeTrackFlow.value = track
-        _artworkBitmapFlow.value = extractArtwork(newSession.lastMetadata)
-        _artworkUriFlow.value = extractArtworkUri(newSession.lastMetadata)
+        _artworkBitmapFlow.value = extractArtwork(meta)
+        _artworkUriFlow.value = extractArtworkUri(meta)
 
         if (track != null) {
             scrobbleEngine.onTrackStarted(track)
@@ -526,15 +536,24 @@ class PlaybackTracker(
         pauseTimeoutJob = null
     }
 
+    private fun isSameTrack(t1: Track?, t2: Track?): Boolean {
+        if (t1 == null && t2 == null) return true
+        if (t1 == null || t2 == null) return false
+        return t1.artist.trim().equals(t2.artist.trim(), ignoreCase = true) &&
+                t1.title.trim().equals(t2.title.trim(), ignoreCase = true)
+    }
+
     private fun triggerNowPlaying(track: Track) {
-        if (track != activeTrack) return
-        if (nowPlayingSentForTrack == track) return
+        val active = activeTrack ?: return
+        if (!isSameTrack(track, active)) return
+        if (nowPlayingSentForTrack != null && isSameTrack(nowPlayingSentForTrack, track)) return
 
         nowPlayingJob?.cancel()
         nowPlayingJob = scope.launch {
             val settings = settingsRepository.getSettings()
             if (!settings.sendNowPlaying) return@launch
-            if (activeTrack != track) return@launch
+            val current = activeTrack ?: return@launch
+            if (!isSameTrack(track, current)) return@launch
 
             val sessionKey = authRepository.getSessionKey()
             if (!sessionKey.isNullOrBlank() && networkDetector.isOnline()) {
@@ -548,7 +567,8 @@ class PlaybackTracker(
                     sessionKey = sessionKey
                 )
                 if (result is com.sscrobbler.app.lastfm.LastFmResult.Success) {
-                    if (activeTrack == track) {
+                    val afterCall = activeTrack
+                    if (afterCall != null && isSameTrack(afterCall, track)) {
                         nowPlayingSentForTrack = track
                     }
                 }

@@ -407,4 +407,39 @@ class PlaybackTrackerTest {
 
         tracker.destroy()
     }
+
+    @Test
+    fun testSameTrackMetadataUpdate_doesNotResetScrobbleSession() = runTest {
+        tracker = PlaybackTracker(
+            scrobbleEngine = scrobbleEngine,
+            settingsRepository = settingsRepository,
+            authRepository = authRepository,
+            lastFmClient = lastFmClient,
+            networkDetector = networkDetector,
+            clock = clock,
+            scope = this
+        )
+
+        val controller = FakeMediaControllerAdapter(
+            packageName = "com.spotify.music",
+            initialPlaybackState = mockPlaybackState(PlaybackState.STATE_PLAYING, 5_000L),
+            initialMetadata = mockMetadata("Song Stable", "Artist Stable", durationMs = null)
+        )
+
+        tracker.registerController(controller)
+        runCurrent()
+
+        coVerify(exactly = 1) { scrobbleEngine.onTrackStarted(any()) }
+
+        // Second metadata update for the same track arrives with duration
+        controller.dispatchMetadata(mockMetadata("Song Stable", "Artist Stable", durationMs = 210_000L))
+        runCurrent()
+
+        // Verify finalizeCurrentSession was NOT called (session was preserved!)
+        coVerify(exactly = 0) { scrobbleEngine.finalizeCurrentSession(com.sscrobbler.app.scrobble.FinalizeReason.TrackChanged) }
+        // Verify onTrackStarted was NOT called a second time
+        coVerify(exactly = 1) { scrobbleEngine.onTrackStarted(any()) }
+
+        tracker.destroy()
+    }
 }
