@@ -77,22 +77,6 @@ class ScrobbleEngine(
         lastKnownPositionMs = 0L
         pausedAtElapsedMs = null
         _statusFlow.value = ScrobbleStatus.Listening
-
-        // Update Now Playing if enabled
-        if (settings.sendNowPlaying) {
-            val sessionKey = authRepository.getSessionKey()
-            if (!sessionKey.isNullOrBlank() && networkDetector.isOnline()) {
-                val durationSec = track.durationMs?.let { (it / 1000).toInt() }
-                lastFmClient.updateNowPlaying(
-                    artist = track.artist,
-                    track = track.title,
-                    album = track.album,
-                    albumArtist = track.albumArtist,
-                    durationSeconds = durationSec,
-                    sessionKey = sessionKey
-                )
-            }
-        }
     }
 
     suspend fun onPlaybackStateChanged(isPlaying: Boolean) {

@@ -113,6 +113,11 @@ class PlaybackTrackerTest {
         coEvery { mock.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) } returns artist
         coEvery { mock.getString(MediaMetadata.METADATA_KEY_AUTHOR) } returns artist
         coEvery { mock.getString(MediaMetadata.METADATA_KEY_ALBUM) } returns album
+        val desc = mockk<android.media.MediaDescription>(relaxed = true)
+        coEvery { desc.title } returns null
+        coEvery { desc.subtitle } returns null
+        coEvery { desc.description } returns null
+        coEvery { mock.description } returns desc
         coEvery { mock.getLong(MediaMetadata.METADATA_KEY_DURATION) } returns (durationMs ?: 0L)
         return mock
     }
@@ -295,6 +300,110 @@ class PlaybackTrackerTest {
 
         coVerify(exactly = 1) { scrobbleEngine.finalizeCurrentSession(com.sscrobbler.app.scrobble.FinalizeReason.NaturalEnd) }
         assertNull(tracker.activeSessionKey)
+
+        tracker.destroy()
+    }
+
+    @Test
+    fun testTrackChange_doesNotSendPreviousTrackToNowPlaying() = runTest {
+        tracker = PlaybackTracker(
+            scrobbleEngine = scrobbleEngine,
+            settingsRepository = settingsRepository,
+            authRepository = authRepository,
+            lastFmClient = lastFmClient,
+            networkDetector = networkDetector,
+            clock = clock,
+            scope = this
+        )
+
+        val controller = FakeMediaControllerAdapter(
+            packageName = "com.spotify.music",
+            initialPlaybackState = mockPlaybackState(PlaybackState.STATE_PLAYING, 10_000L),
+            initialMetadata = mockMetadata("Track 1", "Artist 1", durationMs = 200_000L)
+        )
+
+        tracker.registerController(controller)
+        runCurrent()
+
+        coVerify(exactly = 1) {
+            lastFmClient.updateNowPlaying(
+                artist = "Artist 1",
+                track = "Track 1",
+                any(), any(), any(), any()
+            )
+        }
+
+        // Track 1 finishes (>70%), Track 2 starts at 0ms.
+        // Controller metadata updates to Track 2 and state updates to PLAYING 0ms
+        clock.advance(180_000L)
+        controller.metadata = mockMetadata("Track 2", "Artist 2", durationMs = 180_000L)
+        controller.dispatchPlaybackState(mockPlaybackState(PlaybackState.STATE_PLAYING, 0L))
+        runCurrent()
+
+        // Track 2 metadata dispatched
+        controller.dispatchMetadata(mockMetadata("Track 2", "Artist 2", durationMs = 180_000L))
+        runCurrent()
+
+        // Track 1 should NOT have been re-sent to Now Playing
+        coVerify(exactly = 1) {
+            lastFmClient.updateNowPlaying(
+                artist = "Artist 1",
+                track = "Track 1",
+                any(), any(), any(), any()
+            )
+        }
+
+        // Track 2 should be sent to Now Playing
+        coVerify(exactly = 1) {
+            lastFmClient.updateNowPlaying(
+                artist = "Artist 2",
+                track = "Track 2",
+                any(), any(), any(), any()
+            )
+        }
+
+        tracker.destroy()
+    }
+
+    @Test
+    fun testPausePlayback_doesNotSendUpdateNowPlaying() = runTest {
+        tracker = PlaybackTracker(
+            scrobbleEngine = scrobbleEngine,
+            settingsRepository = settingsRepository,
+            authRepository = authRepository,
+            lastFmClient = lastFmClient,
+            networkDetector = networkDetector,
+            clock = clock,
+            scope = this
+        )
+
+        val controller = FakeMediaControllerAdapter(
+            packageName = "com.spotify.music",
+            initialPlaybackState = mockPlaybackState(PlaybackState.STATE_PLAYING, 10_000L),
+            initialMetadata = mockMetadata("Song Pause", "Artist Pause")
+        )
+
+        tracker.registerController(controller)
+        runCurrent()
+
+        coVerify(exactly = 1) {
+            lastFmClient.updateNowPlaying(
+                artist = "Artist Pause",
+                track = "Song Pause",
+                any(), any(), any(), any()
+            )
+        }
+
+        // Pause playback
+        controller.dispatchPlaybackState(mockPlaybackState(PlaybackState.STATE_PAUSED, 12_000L))
+        runCurrent()
+
+        // Verify updateNowPlaying was NOT called again (no bogus duration=1 calls)
+        coVerify(exactly = 1) {
+            lastFmClient.updateNowPlaying(
+                any(), any(), any(), any(), any(), any()
+            )
+        }
 
         tracker.destroy()
     }
