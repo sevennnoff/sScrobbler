@@ -442,4 +442,117 @@ class PlaybackTrackerTest {
 
         tracker.destroy()
     }
+
+    @Test
+    fun testResumeFromPause_resendsNowPlaying() = runTest {
+        tracker = PlaybackTracker(
+            scrobbleEngine = scrobbleEngine,
+            settingsRepository = settingsRepository,
+            authRepository = authRepository,
+            lastFmClient = lastFmClient,
+            networkDetector = networkDetector,
+            clock = clock,
+            scope = this
+        )
+
+        val controller = FakeMediaControllerAdapter(
+            packageName = "com.spotify.music",
+            initialPlaybackState = mockPlaybackState(PlaybackState.STATE_PLAYING, 10_000L),
+            initialMetadata = mockMetadata("Song Resume", "Artist Resume", durationMs = 200_000L)
+        )
+
+        tracker.registerController(controller)
+        runCurrent()
+
+        // 1st call on track start
+        coVerify(exactly = 1) {
+            lastFmClient.updateNowPlaying(
+                artist = "Artist Resume",
+                track = "Song Resume",
+                any(), any(), any(), any()
+            )
+        }
+
+        // Pause playback for 30s
+        clock.advance(30_000L)
+        controller.dispatchPlaybackState(mockPlaybackState(PlaybackState.STATE_PAUSED, 40_000L))
+        runCurrent()
+
+        // Resume playback
+        clock.advance(5_000L)
+        controller.dispatchPlaybackState(mockPlaybackState(PlaybackState.STATE_PLAYING, 40_000L))
+        runCurrent()
+
+        // Verify updateNowPlaying was called a 2nd time on resume
+        coVerify(exactly = 2) {
+            lastFmClient.updateNowPlaying(
+                artist = "Artist Resume",
+                track = "Song Resume",
+                any(), any(), any(), any()
+            )
+        }
+
+        tracker.destroy()
+    }
+
+    @Test
+    fun testLongPlayingTrack_refreshesNowPlayingOnTick() = runTest {
+        tracker = PlaybackTracker(
+            scrobbleEngine = scrobbleEngine,
+            settingsRepository = settingsRepository,
+            authRepository = authRepository,
+            lastFmClient = lastFmClient,
+            networkDetector = networkDetector,
+            clock = clock,
+            scope = this
+        )
+
+        val controller = FakeMediaControllerAdapter(
+            packageName = "com.spotify.music",
+            initialPlaybackState = mockPlaybackState(PlaybackState.STATE_PLAYING, 10_000L),
+            initialMetadata = mockMetadata("Epic Symphony", "Long Artist", durationMs = 600_000L)
+        )
+
+        tracker.registerController(controller)
+        runCurrent()
+
+        // Initial Now Playing sent
+        coVerify(exactly = 1) {
+            lastFmClient.updateNowPlaying(
+                artist = "Long Artist",
+                track = "Epic Symphony",
+                any(), any(), any(), any()
+            )
+        }
+
+        // Advance 100 seconds (less than 150s refresh interval)
+        clock.advance(100_000L)
+        tracker.onTick()
+        runCurrent()
+
+        // Still exactly 1 call
+        coVerify(exactly = 1) {
+            lastFmClient.updateNowPlaying(
+                artist = "Long Artist",
+                track = "Epic Symphony",
+                any(), any(), any(), any()
+            )
+        }
+
+        // Advance another 55 seconds (total 155s >= 150s refresh interval)
+        clock.advance(55_000L)
+        tracker.onTick()
+        runCurrent()
+
+        // Now Playing refreshed (2 calls total)
+        coVerify(exactly = 2) {
+            lastFmClient.updateNowPlaying(
+                artist = "Long Artist",
+                track = "Epic Symphony",
+                any(), any(), any(), any()
+            )
+        }
+
+        tracker.destroy()
+    }
 }

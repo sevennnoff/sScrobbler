@@ -125,7 +125,8 @@ class PlaybackTracker(
 
     private var activeTrack: Track? = null
     private var lastObservedPositionMs: Long = 0L
-    private var nowPlayingSentForTrack: Track? = null
+    private var lastNowPlayingTrack: Track? = null
+    private var lastNowPlayingSentElapsedMs: Long = 0L
     private var nowPlayingJob: Job? = null
 
     private val _activeTrackFlow = MutableStateFlow<Track?>(null)
@@ -211,13 +212,23 @@ class PlaybackTracker(
             val pos = session.currentPosition()
             val duration = activeTrack?.durationMs ?: 0L
             if (duration > 0 && lastObservedPositionMs > (duration * 0.70) && pos < 5000L) {
-                nowPlayingSentForTrack = null
+                lastNowPlayingTrack = null
+                lastNowPlayingSentElapsedMs = 0L
             }
             session.lastKnownPositionMs = pos
             lastObservedPositionMs = pos
             _positionFlow.value = pos
             _isPlayingFlow.value = true
             scrobbleEngine.onPositionChanged(pos)
+
+            // Periodically refresh Now Playing for long tracks (Last.fm server TTL is ~3-4 minutes)
+            val current = activeTrack
+            if (current != null) {
+                val now = clock.elapsedRealtime()
+                if (now - lastNowPlayingSentElapsedMs >= 150_000L) {
+                    triggerNowPlaying(current, force = true)
+                }
+            }
         } else {
             val pos = session.currentPosition()
             _positionFlow.value = pos
@@ -227,7 +238,8 @@ class PlaybackTracker(
                 scrobbleEngine.finalizeCurrentSession(FinalizeReason.NaturalEnd)
                 activeSessionKey = null
                 activeTrack = null
-                nowPlayingSentForTrack = null
+                lastNowPlayingTrack = null
+                lastNowPlayingSentElapsedMs = 0L
                 nowPlayingJob?.cancel()
                 _activeTrackFlow.value = null
                 _isPlayingFlow.value = false
@@ -303,7 +315,8 @@ class PlaybackTracker(
                 scrobbleEngine.finalizeCurrentSession(FinalizeReason.SessionDestroyed)
                 activeSessionKey = null
                 activeTrack = null
-                nowPlayingSentForTrack = null
+                lastNowPlayingTrack = null
+                lastNowPlayingSentElapsedMs = 0L
                 nowPlayingJob?.cancel()
                 _activeTrackFlow.value = null
                 _isPlayingFlow.value = false
@@ -347,9 +360,10 @@ class PlaybackTracker(
                 if (duration > 0 && lastObservedPositionMs > (duration * 0.70) && pos < 5000L && isPlaying) {
                     scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackRepeated)
                     currentTrack?.let {
-                        nowPlayingSentForTrack = null
+                        lastNowPlayingTrack = null
+                        lastNowPlayingSentElapsedMs = 0L
                         scrobbleEngine.onTrackStarted(it)
-                        triggerNowPlaying(it)
+                        triggerNowPlaying(it, force = true)
                     }
                     lastObservedPositionMs = pos
                     session.lastKnownPositionMs = pos
@@ -361,7 +375,8 @@ class PlaybackTracker(
                     scrobbleEngine.finalizeCurrentSession(FinalizeReason.NaturalEnd)
                     activeSessionKey = null
                     activeTrack = null
-                    nowPlayingSentForTrack = null
+                    lastNowPlayingTrack = null
+                    lastNowPlayingSentElapsedMs = 0L
                     nowPlayingJob?.cancel()
                     _activeTrackFlow.value = null
                     _isPlayingFlow.value = false
@@ -376,11 +391,12 @@ class PlaybackTracker(
 
                 if (isPlaying) {
                     cancelPauseTimeout()
-                    if (currentTrack != null && (nowPlayingSentForTrack == null || !isSameTrack(nowPlayingSentForTrack, currentTrack))) {
-                        triggerNowPlaying(currentTrack)
+                    if (currentTrack != null) {
+                        triggerNowPlaying(currentTrack, force = true)
                     }
                 } else {
                     schedulePauseTimeout()
+                    nowPlayingJob?.cancel()
                 }
 
                 lastObservedPositionMs = pos
@@ -399,7 +415,8 @@ class PlaybackTracker(
             if (activeSessionKey == pkg) {
                 if (newTrack != null && !isSameTrack(newTrack, activeTrack)) {
                     nowPlayingJob?.cancel()
-                    nowPlayingSentForTrack = null
+                    lastNowPlayingTrack = null
+                    lastNowPlayingSentElapsedMs = 0L
                     val newBitmap = extractArtwork(metadata)
                     val newUri = extractArtworkUri(metadata)
                     activeTrack = newTrack
@@ -415,7 +432,7 @@ class PlaybackTracker(
                     if (session.isPlaying()) {
                         _isPlayingFlow.value = true
                         scrobbleEngine.onPlaybackStateChanged(true)
-                        triggerNowPlaying(newTrack)
+                        triggerNowPlaying(newTrack, force = true)
                     }
                 } else if (newTrack != null && isSameTrack(newTrack, activeTrack)) {
                     val newBitmap = extractArtwork(metadata)
@@ -438,9 +455,10 @@ class PlaybackTracker(
                     val duration = newTrack.durationMs ?: activeTrack?.durationMs ?: 0L
                     if (duration > 0 && lastObservedPositionMs > (duration * 0.70) && pos < 5000L) {
                         scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackRepeated)
-                        nowPlayingSentForTrack = null
+                        lastNowPlayingTrack = null
+                        lastNowPlayingSentElapsedMs = 0L
                         scrobbleEngine.onTrackStarted(newTrack)
-                        triggerNowPlaying(newTrack)
+                        triggerNowPlaying(newTrack, force = true)
                         lastObservedPositionMs = pos
                         session.lastKnownPositionMs = pos
                         _positionFlow.value = pos
@@ -484,7 +502,8 @@ class PlaybackTracker(
         newSession.lastMetadata = meta
         val track = extractTrack(meta, newKey)
         nowPlayingJob?.cancel()
-        nowPlayingSentForTrack = null
+        lastNowPlayingTrack = null
+        lastNowPlayingSentElapsedMs = 0L
         activeTrack = track
         _activeTrackFlow.value = track
         _artworkBitmapFlow.value = extractArtwork(meta)
@@ -497,7 +516,7 @@ class PlaybackTracker(
             scrobbleEngine.onPlaybackStateChanged(isPlaying)
             if (isPlaying) {
                 cancelPauseTimeout()
-                triggerNowPlaying(track)
+                triggerNowPlaying(track, force = true)
             } else {
                 schedulePauseTimeout()
             }
@@ -520,7 +539,8 @@ class PlaybackTracker(
                 scrobbleEngine.finalizeCurrentSession(FinalizeReason.PauseTimeout)
                 activeSessionKey = null
                 activeTrack = null
-                nowPlayingSentForTrack = null
+                lastNowPlayingTrack = null
+                lastNowPlayingSentElapsedMs = 0L
                 nowPlayingJob?.cancel()
                 _activeTrackFlow.value = null
                 _isPlayingFlow.value = false
@@ -543,10 +563,22 @@ class PlaybackTracker(
                 t1.title.trim().equals(t2.title.trim(), ignoreCase = true)
     }
 
-    private fun triggerNowPlaying(track: Track) {
+    private fun triggerNowPlaying(track: Track, force: Boolean = false) {
         val active = activeTrack ?: return
         if (!isSameTrack(track, active)) return
-        if (nowPlayingSentForTrack != null && isSameTrack(nowPlayingSentForTrack, track)) return
+
+        val now = clock.elapsedRealtime()
+        val isDifferentTrack = !isSameTrack(lastNowPlayingTrack, track)
+
+        // Throttle rapid duplicate calls for the same track
+        if (!isDifferentTrack && !force && (now - lastNowPlayingSentElapsedMs < 30_000L)) {
+            return
+        }
+
+        // Even with force (resume from pause / periodic tick), avoid spamming if sent in the last 10 seconds
+        if (!isDifferentTrack && (now - lastNowPlayingSentElapsedMs < 10_000L)) {
+            return
+        }
 
         nowPlayingJob?.cancel()
         nowPlayingJob = scope.launch {
@@ -569,7 +601,8 @@ class PlaybackTracker(
                 if (result is com.sscrobbler.app.lastfm.LastFmResult.Success) {
                     val afterCall = activeTrack
                     if (afterCall != null && isSameTrack(afterCall, track)) {
-                        nowPlayingSentForTrack = track
+                        lastNowPlayingTrack = track
+                        lastNowPlayingSentElapsedMs = clock.elapsedRealtime()
                     }
                 }
             }
@@ -645,6 +678,8 @@ class PlaybackTracker(
         cancelPauseTimeout()
         nowPlayingJob?.cancel()
         nowPlayingJob = null
+        lastNowPlayingTrack = null
+        lastNowPlayingSentElapsedMs = 0L
         trackedSessions.values.forEach { it.controller.unregisterCallback(it) }
         trackedSessions.clear()
     }
