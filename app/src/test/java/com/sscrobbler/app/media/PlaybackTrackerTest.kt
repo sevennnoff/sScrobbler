@@ -555,4 +555,51 @@ class PlaybackTrackerTest {
 
         tracker.destroy()
     }
+
+    @Test
+    fun testPlaybackStopped_clearsActiveTrackAndSendsClearToLastFm() = runTest {
+        tracker = PlaybackTracker(
+            scrobbleEngine = scrobbleEngine,
+            settingsRepository = settingsRepository,
+            authRepository = authRepository,
+            lastFmClient = lastFmClient,
+            networkDetector = networkDetector,
+            clock = clock,
+            scope = this
+        )
+
+        val controller = FakeMediaControllerAdapter(
+            packageName = "com.spotify.music",
+            initialPlaybackState = mockPlaybackState(PlaybackState.STATE_PLAYING, 10_000L),
+            initialMetadata = mockMetadata("Song Stop", "Artist Stop", durationMs = 200_000L)
+        )
+
+        tracker.registerController(controller)
+        runCurrent()
+
+        assertEquals("Song Stop", tracker.activeTrackFlow.value?.title)
+
+        // Stop playback
+        controller.dispatchPlaybackState(mockPlaybackState(PlaybackState.STATE_STOPPED, 50_000L))
+        runCurrent()
+
+        // Verify active track and key cleared in app
+        assertNull(tracker.activeTrackFlow.value)
+        assertNull(tracker.activeSessionKey)
+        coVerify(exactly = 1) { scrobbleEngine.onPlaybackStopped() }
+
+        // Verify clear sent to Last.fm with durationSeconds = 1
+        coVerify(exactly = 1) {
+            lastFmClient.updateNowPlaying(
+                artist = "Artist Stop",
+                track = "Song Stop",
+                album = any(),
+                albumArtist = any(),
+                durationSeconds = 1,
+                sessionKey = any()
+            )
+        }
+
+        tracker.destroy()
+    }
 }

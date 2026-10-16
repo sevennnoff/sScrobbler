@@ -235,6 +235,7 @@ class PlaybackTracker(
             _isPlayingFlow.value = false
             val duration = activeTrack?.durationMs ?: 0L
             if (duration > 0 && pos >= (duration - 3000L)) {
+                val endedTrack = activeTrack
                 scrobbleEngine.finalizeCurrentSession(FinalizeReason.NaturalEnd)
                 activeSessionKey = null
                 activeTrack = null
@@ -247,6 +248,7 @@ class PlaybackTracker(
                 _artworkBitmapFlow.value = null
                 _artworkUriFlow.value = null
                 cancelPauseTimeout()
+                clearNowPlayingOnLastFm(endedTrack)
             }
         }
     }
@@ -267,10 +269,20 @@ class PlaybackTracker(
                 if (entry.key !in newKeys) {
                     entry.value.controller.unregisterCallback(entry.value)
                     if (entry.key == activeSessionKey) {
+                        val destroyedTrack = activeTrack
                         scrobbleEngine.finalizeCurrentSession(FinalizeReason.SessionDestroyed)
                         activeSessionKey = null
                         activeTrack = null
+                        lastNowPlayingTrack = null
+                        lastNowPlayingSentElapsedMs = 0L
+                        nowPlayingJob?.cancel()
+                        _activeTrackFlow.value = null
+                        _isPlayingFlow.value = false
+                        _positionFlow.value = 0L
+                        _artworkBitmapFlow.value = null
+                        _artworkUriFlow.value = null
                         cancelPauseTimeout()
+                        clearNowPlayingOnLastFm(destroyedTrack)
                     }
                     iterator.remove()
                 }
@@ -312,6 +324,7 @@ class PlaybackTracker(
         session.controller.unregisterCallback(session)
         if (pkg == activeSessionKey) {
             scope.launch {
+                val destroyedTrack = activeTrack
                 scrobbleEngine.finalizeCurrentSession(FinalizeReason.SessionDestroyed)
                 activeSessionKey = null
                 activeTrack = null
@@ -324,6 +337,7 @@ class PlaybackTracker(
                 _artworkBitmapFlow.value = null
                 _artworkUriFlow.value = null
                 cancelPauseTimeout()
+                clearNowPlayingOnLastFm(destroyedTrack)
                 arbitrateActiveSession()
             }
         }
@@ -333,6 +347,8 @@ class PlaybackTracker(
         scope.launch {
             val pkg = session.controller.packageName
             val isPlaying = session.isPlaying()
+            val stateCode = state?.state ?: PlaybackState.STATE_NONE
+            val isStopped = stateCode == PlaybackState.STATE_STOPPED || stateCode == PlaybackState.STATE_NONE
 
             if (isPlaying && activeSessionKey != pkg) {
                 switchActiveSession(pkg)
@@ -340,6 +356,24 @@ class PlaybackTracker(
             }
 
             if (activeSessionKey == pkg) {
+                if (isStopped) {
+                    val stoppedTrack = activeTrack
+                    scrobbleEngine.onPlaybackStopped()
+                    activeSessionKey = null
+                    activeTrack = null
+                    lastNowPlayingTrack = null
+                    lastNowPlayingSentElapsedMs = 0L
+                    nowPlayingJob?.cancel()
+                    _activeTrackFlow.value = null
+                    _isPlayingFlow.value = false
+                    _positionFlow.value = 0L
+                    _artworkBitmapFlow.value = null
+                    _artworkUriFlow.value = null
+                    cancelPauseTimeout()
+                    clearNowPlayingOnLastFm(stoppedTrack)
+                    return@launch
+                }
+
                 // If controller metadata is ahead of activeTrack, route to metadata changed first
                 val liveMeta = session.controller.metadata ?: session.lastMetadata
                 val liveTrack = extractTrack(liveMeta, pkg)
@@ -372,6 +406,7 @@ class PlaybackTracker(
 
                 // Check natural end
                 if (duration > 0 && pos >= (duration - 3000L) && !isPlaying) {
+                    val endedTrack = activeTrack
                     scrobbleEngine.finalizeCurrentSession(FinalizeReason.NaturalEnd)
                     activeSessionKey = null
                     activeTrack = null
@@ -384,6 +419,7 @@ class PlaybackTracker(
                     _artworkBitmapFlow.value = null
                     _artworkUriFlow.value = null
                     cancelPauseTimeout()
+                    clearNowPlayingOnLastFm(endedTrack)
                     return@launch
                 }
 
@@ -536,6 +572,7 @@ class PlaybackTracker(
             val timeoutMs = settings.pauseTimeoutMs
             if (timeoutMs > 0L) {
                 delay(timeoutMs)
+                val timedOutTrack = activeTrack
                 scrobbleEngine.finalizeCurrentSession(FinalizeReason.PauseTimeout)
                 activeSessionKey = null
                 activeTrack = null
@@ -547,6 +584,7 @@ class PlaybackTracker(
                 _positionFlow.value = 0L
                 _artworkBitmapFlow.value = null
                 _artworkUriFlow.value = null
+                clearNowPlayingOnLastFm(timedOutTrack)
             }
         }
     }
@@ -554,6 +592,25 @@ class PlaybackTracker(
     private fun cancelPauseTimeout() {
         pauseTimeoutJob?.cancel()
         pauseTimeoutJob = null
+    }
+
+    private fun clearNowPlayingOnLastFm(track: Track?) {
+        if (track == null) return
+        scope.launch {
+            val settings = settingsRepository.getSettings()
+            if (!settings.sendNowPlaying) return@launch
+            val sessionKey = authRepository.getSessionKey()
+            if (!sessionKey.isNullOrBlank() && networkDetector.isOnline()) {
+                lastFmClient.updateNowPlaying(
+                    artist = track.artist,
+                    track = track.title,
+                    album = track.album,
+                    albumArtist = track.albumArtist,
+                    durationSeconds = 1,
+                    sessionKey = sessionKey
+                )
+            }
+        }
     }
 
     private fun isSameTrack(t1: Track?, t2: Track?): Boolean {
