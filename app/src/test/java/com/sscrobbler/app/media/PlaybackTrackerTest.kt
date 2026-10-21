@@ -557,7 +557,7 @@ class PlaybackTrackerTest {
     }
 
     @Test
-    fun testPlaybackStopped_clearsActiveTrackAndSendsClearToLastFm() = runTest {
+    fun testPlaybackStopped_resetsStateWithoutExtraNowPlaying() = runTest {
         tracker = PlaybackTracker(
             scrobbleEngine = scrobbleEngine,
             settingsRepository = settingsRepository,
@@ -588,8 +588,8 @@ class PlaybackTrackerTest {
         assertNull(tracker.activeSessionKey)
         coVerify(exactly = 1) { scrobbleEngine.onPlaybackStopped() }
 
-        // Verify clear sent to Last.fm with durationSeconds = 1
-        coVerify(exactly = 1) {
+        // Last.fm has no API to clear Now Playing: no bogus duration=1 call must be sent
+        coVerify(exactly = 0) {
             lastFmClient.updateNowPlaying(
                 artist = "Artist Stop",
                 track = "Song Stop",
@@ -598,132 +598,6 @@ class PlaybackTrackerTest {
                 durationSeconds = 1,
                 sessionKey = any()
             )
-        }
-
-        tracker.destroy()
-    }
-
-    @Test
-    fun testPause_clearsNowPlayingOnlyAfterDelay() = runTest {
-        tracker = PlaybackTracker(
-            scrobbleEngine = scrobbleEngine,
-            settingsRepository = settingsRepository,
-            authRepository = authRepository,
-            lastFmClient = lastFmClient,
-            networkDetector = networkDetector,
-            clock = clock,
-            scope = this
-        )
-
-        val controller = FakeMediaControllerAdapter(
-            packageName = "com.spotify.music",
-            initialPlaybackState = mockPlaybackState(PlaybackState.STATE_PLAYING, 10_000L),
-            initialMetadata = mockMetadata("Paused Song", "Paused Artist", durationMs = 200_000L)
-        )
-
-        tracker.registerController(controller)
-        runCurrent()
-
-        coVerify(exactly = 1) {
-            lastFmClient.updateNowPlaying("Paused Artist", "Paused Song", any(), any(), 200, any())
-        }
-
-        controller.dispatchPlaybackState(mockPlaybackState(PlaybackState.STATE_PAUSED, 60_000L))
-        runCurrent()
-
-        // Before the 12s delay expires - nothing is cleared
-        advanceTimeBy(11_000L)
-        runCurrent()
-        coVerify(exactly = 0) {
-            lastFmClient.updateNowPlaying("Paused Artist", "Paused Song", any(), any(), 1, any())
-        }
-
-        // After the delay - status is cleared with the 1s TTL trick
-        advanceTimeBy(2_000L)
-        runCurrent()
-        coVerify(exactly = 1) {
-            lastFmClient.updateNowPlaying("Paused Artist", "Paused Song", any(), any(), 1, any())
-        }
-
-        tracker.destroy()
-    }
-
-    @Test
-    fun testResumeBeforeClearDelay_doesNotClearNowPlaying() = runTest {
-        tracker = PlaybackTracker(
-            scrobbleEngine = scrobbleEngine,
-            settingsRepository = settingsRepository,
-            authRepository = authRepository,
-            lastFmClient = lastFmClient,
-            networkDetector = networkDetector,
-            clock = clock,
-            scope = this
-        )
-
-        val controller = FakeMediaControllerAdapter(
-            packageName = "com.spotify.music",
-            initialPlaybackState = mockPlaybackState(PlaybackState.STATE_PLAYING, 10_000L),
-            initialMetadata = mockMetadata("Quick Pause", "Quick Artist", durationMs = 200_000L)
-        )
-
-        tracker.registerController(controller)
-        runCurrent()
-
-        controller.dispatchPlaybackState(mockPlaybackState(PlaybackState.STATE_PAUSED, 30_000L))
-        runCurrent()
-        advanceTimeBy(10_000L)
-        clock.advance(10_000L)
-        runCurrent()
-
-        controller.dispatchPlaybackState(mockPlaybackState(PlaybackState.STATE_PLAYING, 30_000L))
-        runCurrent()
-
-        // The pending clear was cancelled: no duration=1 call at all
-        coVerify(exactly = 0) {
-            lastFmClient.updateNowPlaying(any(), any(), any(), any(), 1, any())
-        }
-        // Initial send + resume re-send
-        coVerify(exactly = 2) {
-            lastFmClient.updateNowPlaying("Quick Artist", "Quick Pause", any(), any(), 200, any())
-        }
-
-        tracker.destroy()
-    }
-
-    @Test
-    fun testPauseThenTrackChange_doesNotClearOldTrack() = runTest {
-        tracker = PlaybackTracker(
-            scrobbleEngine = scrobbleEngine,
-            settingsRepository = settingsRepository,
-            authRepository = authRepository,
-            lastFmClient = lastFmClient,
-            networkDetector = networkDetector,
-            clock = clock,
-            scope = this
-        )
-
-        val controller = FakeMediaControllerAdapter(
-            packageName = "com.spotify.music",
-            initialPlaybackState = mockPlaybackState(PlaybackState.STATE_PLAYING, 10_000L),
-            initialMetadata = mockMetadata("Old Song", "Old Artist", durationMs = 200_000L)
-        )
-
-        tracker.registerController(controller)
-        runCurrent()
-
-        controller.dispatchPlaybackState(mockPlaybackState(PlaybackState.STATE_PAUSED, 40_000L))
-        runCurrent()
-
-        // Next track metadata arrives while paused
-        controller.dispatchMetadata(mockMetadata("New Song", "New Artist", durationMs = 180_000L))
-        runCurrent()
-
-        advanceTimeBy(13_000L)
-        runCurrent()
-
-        // Old track must not be cleared: the pending clear is cancelled on track change
-        coVerify(exactly = 0) {
-            lastFmClient.updateNowPlaying("Old Artist", "Old Song", any(), any(), 1, any())
         }
 
         tracker.destroy()

@@ -157,7 +157,6 @@ fun DebugScreen(
                 DebugInfoLine("Now Playing", if (settingsState.sendNowPlaying) "enabled" else "disabled")
                 DebugInfoLine("Threshold", "${settingsState.minListenedPercent}% / max ${settingsState.maxRequiredTimeMs / 1000}s, min track ${settingsState.minTrackDurationMs / 1000}s")
                 DebugInfoLine("Pause timeout", "${settingsState.pauseTimeoutMs / 1000 / 60} min")
-                DebugInfoLine("NP clear on pause", "after 12s")
                 DebugInfoLine("Allowed apps", "${settingsState.appSources.count { it.isEnabled }} of ${settingsState.appSources.size}")
             }
         }
