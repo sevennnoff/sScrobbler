@@ -61,6 +61,9 @@ class SettingsViewModelTest {
 
     @After
     fun tearDown() {
+        // Drain any queued viewModelScope work before the Main dispatcher is restored,
+        // otherwise a late coroutine can hit the real (unavailable) Android Main looper.
+        testDispatcher.scheduler.advanceUntilIdle()
         Dispatchers.resetMain()
     }
 
