@@ -25,7 +25,7 @@ android {
 
     // Version can be overridden by CI (-PappVersionName=v1.0.9) so the APK
     // always carries the same version as the GitHub release tag.
-    val rawVersionName = (findProperty("appVersionName") as String?)?.removePrefix("v") ?: "1.0.9"
+    val rawVersionName = (findProperty("appVersionName") as String?)?.removePrefix("v") ?: "1.0.10"
     val parsedVersionCode = rawVersionName.split(".", "-").mapNotNull { it.toIntOrNull() }
         .let { parts ->
             val major = parts.getOrElse(0) { 1 }

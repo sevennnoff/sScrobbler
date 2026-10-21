@@ -27,6 +27,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 interface MediaControllerAdapter {
     val packageName: String
@@ -129,6 +131,11 @@ class PlaybackTracker(
     private var lastNowPlayingTrack: Track? = null
     private var lastNowPlayingSentElapsedMs: Long = 0L
     private var nowPlayingJob: Job? = null
+    private var nowPlayingClearJob: Job? = null
+    private val nowPlayingMutex = Mutex()
+
+    /** How long a track may stay paused before the Last.fm "listening now" status is cleared. */
+    private val nowPlayingClearDelayMs = 12_000L
 
     private val _activeTrackFlow = MutableStateFlow<Track?>(null)
     val activeTrackFlow: StateFlow<Track?> = _activeTrackFlow.asStateFlow()
@@ -432,12 +439,14 @@ class PlaybackTracker(
 
                 if (isPlaying) {
                     cancelPauseTimeout()
+                    cancelNowPlayingClear()
                     if (currentTrack != null) {
                         triggerNowPlaying(currentTrack, force = true)
                     }
                 } else {
                     schedulePauseTimeout()
                     nowPlayingJob?.cancel()
+                    scheduleNowPlayingClear(session, currentTrack)
                 }
 
                 lastObservedPositionMs = pos
@@ -461,6 +470,7 @@ class PlaybackTracker(
             if (activeSessionKey == pkg) {
                 if (newTrack != null && !isSameTrack(newTrack, activeTrack)) {
                     nowPlayingJob?.cancel()
+                    cancelNowPlayingClear()
                     lastNowPlayingTrack = null
                     lastNowPlayingSentElapsedMs = 0L
                     val newBitmap = extractArtwork(metadata)
@@ -549,6 +559,7 @@ class PlaybackTracker(
         newSession.lastMetadata = meta
         val track = extractTrack(meta, newKey)
         nowPlayingJob?.cancel()
+        cancelNowPlayingClear()
         lastNowPlayingTrack = null
         lastNowPlayingSentElapsedMs = 0L
         activeTrack = track
@@ -583,19 +594,18 @@ class PlaybackTracker(
             val timeoutMs = settings.pauseTimeoutMs
             if (timeoutMs > 0L) {
                 delay(timeoutMs)
-                val timedOutTrack = activeTrack
                 scrobbleEngine.finalizeCurrentSession(FinalizeReason.PauseTimeout)
                 activeSessionKey = null
                 activeTrack = null
                 lastNowPlayingTrack = null
                 lastNowPlayingSentElapsedMs = 0L
                 nowPlayingJob?.cancel()
+                cancelNowPlayingClear()
                 _activeTrackFlow.value = null
                 _isPlayingFlow.value = false
                 _positionFlow.value = 0L
                 _artworkBitmapFlow.value = null
                 _artworkUriFlow.value = null
-                clearNowPlayingOnLastFm(timedOutTrack)
             }
         }
     }
@@ -605,23 +615,52 @@ class PlaybackTracker(
         pauseTimeoutJob = null
     }
 
+    private fun scheduleNowPlayingClear(session: ControllerSession, track: Track?) {
+        cancelNowPlayingClear()
+        if (track == null) return
+        nowPlayingClearJob = scope.launch {
+            delay(nowPlayingClearDelayMs)
+            // User resumed, switched track or the session is gone: keep the status as-is.
+            if (session.isPlaying()) return@launch
+            val current = activeTrack ?: return@launch
+            if (!isSameTrack(current, track)) return@launch
+            DebugLog.log("NP", "pause > ${nowPlayingClearDelayMs / 1000}s, clearing status")
+            performClearNowPlaying(track)
+        }
+    }
+
+    private fun cancelNowPlayingClear() {
+        nowPlayingClearJob?.cancel()
+        nowPlayingClearJob = null
+    }
+
     private fun clearNowPlayingOnLastFm(track: Track?) {
         if (track == null) return
-        scope.launch {
-            val settings = settingsRepository.getSettings()
-            if (!settings.sendNowPlaying) return@launch
-            val sessionKey = authRepository.getSessionKey()
-            if (!sessionKey.isNullOrBlank() && networkDetector.isOnline()) {
-                DebugLog.log("NP", "CLEAR ${track.artist} - ${track.title}")
-                lastFmClient.updateNowPlaying(
-                    artist = track.artist,
-                    track = track.title,
-                    album = track.album,
-                    albumArtist = track.albumArtist,
-                    durationSeconds = 1,
-                    sessionKey = sessionKey
-                )
-            }
+        cancelNowPlayingClear()
+        scope.launch { performClearNowPlaying(track) }
+    }
+
+    private suspend fun performClearNowPlaying(track: Track) {
+        val settings = settingsRepository.getSettings()
+        if (!settings.sendNowPlaying) return
+        val sessionKey = authRepository.getSessionKey()
+        if (sessionKey.isNullOrBlank() || !networkDetector.isOnline()) return
+
+        DebugLog.log("NP", "CLEAR ${track.artist} - ${track.title}")
+        nowPlayingMutex.withLock {
+            lastFmClient.updateNowPlaying(
+                artist = track.artist,
+                track = track.title,
+                album = track.album,
+                albumArtist = track.albumArtist,
+                durationSeconds = 1,
+                sessionKey = sessionKey
+            )
+        }
+        // Allow the next play of the same track to send Now Playing again.
+        if (lastNowPlayingTrack != null && isSameTrack(lastNowPlayingTrack, track)) {
+            lastNowPlayingTrack = null
+            lastNowPlayingSentElapsedMs = 0L
         }
     }
 
@@ -650,6 +689,7 @@ class PlaybackTracker(
         }
 
         nowPlayingJob?.cancel()
+        cancelNowPlayingClear()
         nowPlayingJob = scope.launch {
             val settings = settingsRepository.getSettings()
             if (!settings.sendNowPlaying) return@launch
@@ -663,14 +703,16 @@ class PlaybackTracker(
                     "NP",
                     "SEND ${track.artist} - ${track.title}" + if (force) " (forced)" else ""
                 )
-                val result = lastFmClient.updateNowPlaying(
-                    artist = track.artist,
-                    track = track.title,
-                    album = track.album,
-                    albumArtist = track.albumArtist,
-                    durationSeconds = durationSec,
-                    sessionKey = sessionKey
-                )
+                val result = nowPlayingMutex.withLock {
+                    lastFmClient.updateNowPlaying(
+                        artist = track.artist,
+                        track = track.title,
+                        album = track.album,
+                        albumArtist = track.albumArtist,
+                        durationSeconds = durationSec,
+                        sessionKey = sessionKey
+                    )
+                }
                 if (result is com.sscrobbler.app.lastfm.LastFmResult.Success) {
                     val afterCall = activeTrack
                     if (afterCall != null && isSameTrack(afterCall, track)) {
@@ -757,6 +799,7 @@ class PlaybackTracker(
         cancelPauseTimeout()
         nowPlayingJob?.cancel()
         nowPlayingJob = null
+        cancelNowPlayingClear()
         lastNowPlayingTrack = null
         lastNowPlayingSentElapsedMs = 0L
         trackedSessions.values.forEach { it.controller.unregisterCallback(it) }
