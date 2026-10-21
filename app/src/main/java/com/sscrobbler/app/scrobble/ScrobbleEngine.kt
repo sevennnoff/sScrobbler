@@ -13,6 +13,7 @@ import com.sscrobbler.app.model.Track
 import com.sscrobbler.app.settings.AppSettings
 import com.sscrobbler.app.settings.SettingsRepository
 import com.sscrobbler.app.util.Clock
+import com.sscrobbler.app.util.DebugLog
 import com.sscrobbler.app.util.HashUtils
 import com.sscrobbler.app.util.NetworkDetector
 import com.sscrobbler.app.util.SystemClockImpl
@@ -56,6 +57,7 @@ class ScrobbleEngine(
 
         // Check package filter
         if (settings.packageFilter[track.sourcePackage] == false) {
+            DebugLog.log("ENGINE", "IGNORED ${track.artist} - ${track.title} (app ${track.sourcePackage} disabled)")
             finalizeCurrentSession(FinalizeReason.TrackChanged)
             return
         }
@@ -77,6 +79,11 @@ class ScrobbleEngine(
         lastKnownPositionMs = 0L
         pausedAtElapsedMs = null
         _statusFlow.value = ScrobbleStatus.Listening
+        DebugLog.log(
+            "ENGINE",
+            "START ${track.artist} - ${track.title}" +
+                (track.durationMs?.let { " (${it / 1000}s)" } ?: " (duration unknown)")
+        )
     }
 
     suspend fun onPlaybackStateChanged(isPlaying: Boolean) {
@@ -87,12 +94,14 @@ class ScrobbleEngine(
             checkEligibility()
             _currentSessionFlow.value = session
             _statusFlow.value = if (session.eligible) ScrobbleStatus.WaitingForEnd else ScrobbleStatus.Listening
+            DebugLog.log("ENGINE", "PLAY ${session.track.title} @ ${session.totalListenedMs(clock) / 1000}s listened")
         } else {
             session.onPauseOrStop(clock)
             pausedAtElapsedMs = clock.elapsedRealtime()
             checkEligibility()
             _currentSessionFlow.value = session
             _statusFlow.value = if (session.eligible) ScrobbleStatus.Eligible else ScrobbleStatus.Paused
+            DebugLog.log("ENGINE", "PAUSE ${session.track.title} @ ${session.listenedMs / 1000}s listened, eligible=${session.eligible}")
         }
     }
 
@@ -183,6 +192,17 @@ class ScrobbleEngine(
         val timestamp = session.startedAtUnix
         val durationSec = track.durationMs?.let { (it / 1000).toInt() }
         val listenedSec = (session.listenedMs / 1000).toInt()
+        val currentSettings = settingsRepository.getSettings()
+        val thresholdSec = calculateThreshold(
+            durationMs = track.durationMs,
+            minListenedPercent = currentSettings.minListenedPercent,
+            maxRequiredTimeMs = currentSettings.maxRequiredTimeMs
+        ) / 1000
+
+        DebugLog.log(
+            "ENGINE",
+            "FINISH($reason) ${track.artist} - ${track.title} | listened ${listenedSec}s / need ${thresholdSec}s | eligible=${session.eligible}"
+        )
 
         if (session.eligible) {
             val fingerprint = HashUtils.sha256("${track.artist}|${track.title}|$timestamp")
@@ -240,10 +260,18 @@ class ScrobbleEngine(
                         pendingScrobbleDao.deleteById(recordId)
                         historyDao.updateStatus(recordId, ScrobbleStatus.Scrobbled)
                         _statusFlow.value = ScrobbleStatus.Scrobbled
+                        DebugLog.log("ENGINE", "SCROBBLED ${track.artist} - ${track.title}")
+                    } else if (result is LastFmResult.Error) {
+                        DebugLog.log("ENGINE", "SCROBBLE FAILED ${track.artist} - ${track.title}: ${result.message} (queued)")
                     }
+                } else {
+                    DebugLog.log("ENGINE", "SCROBBLE queued: no Last.fm session key")
                 }
+            } else {
+                DebugLog.log("ENGINE", "SCROBBLE queued: offline")
             }
         } else {
+            DebugLog.log("ENGINE", "SKIPPED (below threshold) ${track.artist} - ${track.title}")
             // Not eligible -> Skipped
             val artUrl = if (networkDetector.isOnline()) {
                 lastFmClient.getTrackArtworkUrl(track.artist, track.title)
@@ -287,8 +315,11 @@ class ScrobbleEngine(
                 historyDao.updateStatus(id, ScrobbleStatus.Scrobbled)
             }
             _statusFlow.value = ScrobbleStatus.Scrobbled
+            DebugLog.log("ENGINE", "QUEUE flushed ${ids.size} scrobble(s)")
             ids.size
         } else {
+            val msg = (result as? LastFmResult.Error)?.message ?: "unknown error"
+            DebugLog.log("ENGINE", "QUEUE flush failed (${pendingList.size}): $msg")
             0
         }
     }

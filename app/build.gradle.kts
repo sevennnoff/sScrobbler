@@ -23,12 +23,24 @@ android {
     namespace = "com.sscrobbler.app"
     compileSdk = 35
 
+    // Version can be overridden by CI (-PappVersionName=v1.0.9) so the APK
+    // always carries the same version as the GitHub release tag.
+    val rawVersionName = (findProperty("appVersionName") as String?)?.removePrefix("v") ?: "1.0.9"
+    val parsedVersionCode = rawVersionName.split(".", "-").mapNotNull { it.toIntOrNull() }
+        .let { parts ->
+            val major = parts.getOrElse(0) { 1 }
+            val minor = parts.getOrElse(1) { 0 }
+            val patch = parts.getOrElse(2) { 0 }
+            major * 10_000 + minor * 100 + patch
+        }
+    val appVersionCode = (findProperty("appVersionCode") as String?)?.toIntOrNull() ?: parsedVersionCode
+
     defaultConfig {
         applicationId = "com.sscrobbler.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = appVersionCode
+        versionName = rawVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

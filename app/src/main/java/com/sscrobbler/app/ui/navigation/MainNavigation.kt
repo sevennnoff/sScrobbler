@@ -24,6 +24,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.sscrobbler.app.ui.screens.AppsScreen
+import com.sscrobbler.app.ui.screens.DebugScreen
 import com.sscrobbler.app.ui.screens.HistoryScreen
 import com.sscrobbler.app.ui.screens.NowPlayingScreen
 import com.sscrobbler.app.ui.screens.OnboardingScreen
@@ -38,6 +39,7 @@ enum class AppDestination {
     History,
     Settings,
     Apps,
+    Debug,
     Onboarding
 }
 
@@ -57,7 +59,7 @@ fun MainNavigation(
     // Predictive back handling
     BackHandler(enabled = currentDestination != AppDestination.NowPlaying && currentDestination != AppDestination.Onboarding) {
         when (currentDestination) {
-            AppDestination.Apps -> currentDestination = AppDestination.Settings
+            AppDestination.Apps, AppDestination.Debug -> currentDestination = AppDestination.Settings
             AppDestination.History, AppDestination.Settings -> currentDestination = AppDestination.NowPlaying
             else -> {}
         }
@@ -141,12 +143,20 @@ fun MainNavigation(
                 AppDestination.Settings -> SettingsScreen(
                     viewModel = settingsViewModel,
                     onNavigateToApps = { currentDestination = AppDestination.Apps },
-                    onNavigateToLogin = { currentDestination = AppDestination.Onboarding }
+                    onNavigateToLogin = { currentDestination = AppDestination.Onboarding },
+                    onOpenDebug = { currentDestination = AppDestination.Debug }
                 )
                 AppDestination.Apps -> AppsScreen(
                     viewModel = settingsViewModel,
                     onBack = { currentDestination = AppDestination.Settings }
                 )
+                AppDestination.Debug -> {
+                    val settingsState by settingsViewModel.uiState.collectAsState()
+                    DebugScreen(
+                        settingsState = settingsState,
+                        onBack = { currentDestination = AppDestination.Settings }
+                    )
+                }
                 AppDestination.Onboarding -> OnboardingScreen(
                     viewModel = onboardingViewModel,
                     onFinished = { currentDestination = AppDestination.NowPlaying }

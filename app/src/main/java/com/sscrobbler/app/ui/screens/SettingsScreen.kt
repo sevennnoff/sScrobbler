@@ -49,15 +49,20 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.sscrobbler.app.ui.theme.CardShape
+import android.os.SystemClock
+import com.sscrobbler.app.BuildConfig
 import com.sscrobbler.app.ui.theme.CardShape
 import com.sscrobbler.app.ui.theme.ChipShape
 import com.sscrobbler.app.ui.theme.PillShape
@@ -70,6 +75,7 @@ fun SettingsScreen(
     viewModel: SettingsViewModel,
     onNavigateToApps: () -> Unit,
     onNavigateToLogin: () -> Unit,
+    onOpenDebug: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -119,6 +125,46 @@ fun SettingsScreen(
             state = state,
             context = context,
             viewModel = viewModel
+        )
+
+        // 5. Version footer (tap 5 times to open debug logs)
+        VersionFooter(onOpenDebug = onOpenDebug)
+    }
+}
+
+@Composable
+private fun VersionFooter(onOpenDebug: () -> Unit) {
+    var taps by remember { mutableIntStateOf(0) }
+    var lastTapElapsed by remember { mutableLongStateOf(0L) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 24.dp)
+            .clickable {
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastTapElapsed > 1_500L) taps = 0
+                lastTapElapsed = now
+                taps++
+                if (taps >= 5) {
+                    taps = 0
+                    onOpenDebug()
+                }
+            },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Text(
+            text = "sScrobbler",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = "Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            textAlign = TextAlign.Center
         )
     }
 }

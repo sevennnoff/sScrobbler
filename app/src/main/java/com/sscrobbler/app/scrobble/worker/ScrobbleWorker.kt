@@ -41,12 +41,14 @@ class ScrobbleWorker(
         val networkDetector = networkDetectorOverride ?: app?.networkDetector
 
         if (networkDetector != null && !networkDetector.isOnline()) {
+            com.sscrobbler.app.util.DebugLog.log("WORKER", "skipped: offline")
             return Result.retry()
         }
 
         val sessionKey = authRepo.getSessionKey()
         if (sessionKey.isNullOrBlank()) {
             // Cannot scrobble without auth session
+            com.sscrobbler.app.util.DebugLog.log("WORKER", "skipped: no session key")
             return Result.failure()
         }
 
@@ -75,11 +77,16 @@ class ScrobbleWorker(
                         for (id in ids) {
                             historyDao.updateStatus(id, ScrobbleStatus.Scrobbled)
                         }
+                        com.sscrobbler.app.util.DebugLog.log("WORKER", "batch sent: ${batch.size} scrobble(s)")
                         if (batch.size < BATCH_SIZE) {
                             hasMore = false
                         }
                     }
                     is LastFmResult.Error -> {
+                        com.sscrobbler.app.util.DebugLog.log(
+                            "WORKER",
+                            "batch failed: ${scrobbleResult.message} (code ${scrobbleResult.code})"
+                        )
                         val throwable = scrobbleResult.throwable
                         val isNetworkIssue = throwable is IOException ||
                                 (scrobbleResult.message.contains("network", ignoreCase = true)) ||

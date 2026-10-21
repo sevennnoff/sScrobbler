@@ -13,6 +13,7 @@ import com.sscrobbler.app.scrobble.FinalizeReason
 import com.sscrobbler.app.scrobble.ScrobbleEngine
 import com.sscrobbler.app.settings.SettingsRepository
 import com.sscrobbler.app.util.Clock
+import com.sscrobbler.app.util.DebugLog
 import com.sscrobbler.app.util.NetworkDetector
 import com.sscrobbler.app.util.SystemClockImpl
 import kotlinx.coroutines.CoroutineScope
@@ -349,6 +350,10 @@ class PlaybackTracker(
             val isPlaying = session.isPlaying()
             val stateCode = state?.state ?: PlaybackState.STATE_NONE
             val isStopped = stateCode == PlaybackState.STATE_STOPPED || stateCode == PlaybackState.STATE_NONE
+            DebugLog.log(
+                "TRACK",
+                "state=$stateCode playing=$isPlaying pkg=${pkg.substringAfterLast('.')} pos=${session.currentPosition() / 1000}s track=${activeTrack?.title ?: "none"}"
+            )
 
             if (isPlaying && activeSessionKey != pkg) {
                 switchActiveSession(pkg)
@@ -447,6 +452,11 @@ class PlaybackTracker(
         scope.launch {
             val pkg = session.controller.packageName
             val newTrack = extractTrack(metadata, pkg)
+            DebugLog.log(
+                "TRACK",
+                "metadata pkg=${pkg.substringAfterLast('.')} -> ${newTrack?.artist ?: "?"} - ${newTrack?.title ?: "?"}" +
+                    (newTrack?.durationMs?.let { " (${it / 1000}s)" } ?: " (no duration)")
+            )
 
             if (activeSessionKey == pkg) {
                 if (newTrack != null && !isSameTrack(newTrack, activeTrack)) {
@@ -527,6 +537,7 @@ class PlaybackTracker(
 
     private suspend fun switchActiveSession(newKey: String) {
         val newSession = trackedSessions[newKey] ?: return
+        DebugLog.log("TRACK", "active session -> ${newKey.substringAfterLast('.')}")
 
         if (activeSessionKey != null && activeSessionKey != newKey) {
             scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackChanged)
@@ -601,6 +612,7 @@ class PlaybackTracker(
             if (!settings.sendNowPlaying) return@launch
             val sessionKey = authRepository.getSessionKey()
             if (!sessionKey.isNullOrBlank() && networkDetector.isOnline()) {
+                DebugLog.log("NP", "CLEAR ${track.artist} - ${track.title}")
                 lastFmClient.updateNowPlaying(
                     artist = track.artist,
                     track = track.title,
@@ -647,6 +659,10 @@ class PlaybackTracker(
             val sessionKey = authRepository.getSessionKey()
             if (!sessionKey.isNullOrBlank() && networkDetector.isOnline()) {
                 val durationSec = track.durationMs?.let { (it / 1000).toInt() }
+                DebugLog.log(
+                    "NP",
+                    "SEND ${track.artist} - ${track.title}" + if (force) " (forced)" else ""
+                )
                 val result = lastFmClient.updateNowPlaying(
                     artist = track.artist,
                     track = track.title,
@@ -662,6 +678,12 @@ class PlaybackTracker(
                         lastNowPlayingSentElapsedMs = clock.elapsedRealtime()
                     }
                 }
+            } else {
+                DebugLog.log(
+                    "NP",
+                    "SKIP ${track.artist} - ${track.title}: " +
+                        if (sessionKey.isNullOrBlank()) "no session key" else "offline"
+                )
             }
         }
     }

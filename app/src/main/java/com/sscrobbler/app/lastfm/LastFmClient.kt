@@ -99,6 +99,7 @@ open class LastFmClient(
             .post(formBuilder.build())
             .build()
 
+        val method = params["method"] ?: "unknown"
         return try {
             val response = client.newCall(request).execute()
             val bodyString = response.body?.string().orEmpty()
@@ -107,12 +108,23 @@ open class LastFmClient(
             } else {
                 _connectionErrorFlow.value = null
             }
-            parser(bodyString, response.code)
+            val result = parser(bodyString, response.code)
+            if (result is LastFmResult.Error) {
+                com.sscrobbler.app.util.DebugLog.log(
+                    "API",
+                    "$method -> HTTP ${response.code}, error ${result.code}: ${result.message}"
+                )
+            } else {
+                com.sscrobbler.app.util.DebugLog.log("API", "$method -> HTTP ${response.code}, ok")
+            }
+            result
         } catch (e: IOException) {
             _connectionErrorFlow.value = "Cannot reach Last.fm (check VPN / network)"
+            com.sscrobbler.app.util.DebugLog.log("API", "$method -> network error: ${e.message}")
             LastFmResult.Error(null, "Network error: ${e.message}", e)
         } catch (e: Exception) {
             _connectionErrorFlow.value = "Cannot reach Last.fm (check VPN / network)"
+            com.sscrobbler.app.util.DebugLog.log("API", "$method -> request failed: ${e.message}")
             LastFmResult.Error(null, "Request failed: ${e.message}", e)
         }
     }
