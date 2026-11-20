@@ -67,7 +67,9 @@ android {
             )
         }
         debug {
-            signingConfig = signingConfigs.getByName("release")
+            if (rootProject.file("sscrobbler.jks").isFile) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -89,6 +91,7 @@ android {
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
 
