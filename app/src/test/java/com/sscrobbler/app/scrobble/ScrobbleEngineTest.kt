@@ -308,13 +308,20 @@ class ScrobbleEngineTest {
     }
 
     @Test
+    fun advancingThroughAShortTrackIsNotARepeat() {
+        assertNull(ScrobbleEngine.positionTransition(3_800, 4_100, 5_000, true))
+    }
+
+    @Test
     fun lateDurationChangesEligibilityWithoutRestartingListening() = runTest {
         val track = Track(artist = "Artist", title = "Track", durationMs = null, sourcePackage = "player")
         engine.onTrackStarted(track)
         clock.advance(40_000)
         engine.updateTrackMetadata(track.copy(durationMs = 70_000))
+        engine.updateArtworkUri("content://player/cover")
         engine.onPlaybackStopped()
         assertEquals(40, historyDao.items.single().listenedSeconds)
+        assertEquals("content://player/cover", historyDao.items.single().artworkUrl)
         assertEquals(70, pendingScrobbleDao.items.single().durationSeconds)
     }
 }

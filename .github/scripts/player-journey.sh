@@ -15,7 +15,7 @@ do
     adb shell wm density 320
     adb shell settings put system font_scale 1.3
   fi
-  adb shell am instrument -w -r com.sscrobbler.app.test/androidx.test.runner.AndroidJUnitRunner | tee "player-journey/$appearance.log"
-  adb exec-out run-as com.sscrobbler.app tar -C files -cf - screenshots | tar -xf - -C player-journey
+  adb shell am instrument -w -r com.sscrobbler.app.preview.test/androidx.test.runner.AndroidJUnitRunner | tee "player-journey/$appearance.log"
+  adb exec-out run-as com.sscrobbler.app.preview tar -C files -cf - screenshots | tar -xf - -C player-journey
   grep -Eq '^OK \(1 test\)' "player-journey/$appearance.log"
 done

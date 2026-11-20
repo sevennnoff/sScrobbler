@@ -65,7 +65,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         handleAuthIntent(intent)
         ScrobblerForegroundService.start(this)
-        MediaNotificationListener.ensureRebound(this)
 
         setContent {
             SScrobblerTheme {

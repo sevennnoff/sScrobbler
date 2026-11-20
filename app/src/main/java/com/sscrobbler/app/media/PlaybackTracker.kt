@@ -303,8 +303,10 @@ class PlaybackTracker(
             lastPosition = session.position()
             _positionFlow.value = lastPosition
             scrobbleEngine.onTrackStarted(next)
+            scrobbleEngine.updateArtworkUri(uri)
             applyPlayback(session)
         } else if (previous != null) {
+            scrobbleEngine.updateArtworkUri(uri)
             val enriched = next.copy(
                 durationMs = next.durationMs ?: previous.durationMs,
                 album = next.album ?: previous.album,
@@ -376,17 +378,18 @@ class PlaybackTracker(
         val track = activeTrack ?: return false
         val duration = track.durationMs
         val pos = session.position()
-        val repeated = duration != null && lastPosition > duration * 0.70 && pos < 5_000 && session.isPlaying()
+        val transition = ScrobbleEngine.positionTransition(lastPosition, pos, duration, session.isPlaying())
         lastPosition = pos
         _positionFlow.value = pos
-        if (repeated) {
+        if (transition == FinalizeReason.TrackRepeated) {
             scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackRepeated)
             resetTimers()
             scrobbleEngine.onTrackStarted(track)
+            scrobbleEngine.updateArtworkUri(_artworkUriFlow.value)
             applyPlayback(session)
             return true
         }
-        if (duration != null && duration >= 3_000 && pos >= duration - 3_000 && !session.isPlaying()) {
+        if (transition == FinalizeReason.NaturalEnd) {
             finishActive(FinalizeReason.NaturalEnd)
             arbitrate()
             return true
@@ -406,6 +409,17 @@ class PlaybackTracker(
                 arbitrate()
             }
             val session = trackedSessions[activeSessionKey] ?: return@post
+            val liveState = session.controller.playbackState
+            val previousState = session.state
+            if (liveState != null && (liveState.state != previousState?.state ||
+                    liveState.lastPositionUpdateTime > (previousState?.lastPositionUpdateTime ?: 0L))) {
+                val wasPlaying = session.isPlaying()
+                session.state = liveState
+                session.metadataStartElapsedMs = null
+                session.controller.metadata?.let { session.metadata = it }
+                handleState(session, wasPlaying)
+                if (activeSessionKey != session.controller.packageName) return@post
+            }
             val live = session.controller.metadata
             if (live != null && !isSameTrack(extractTrack(live, session.controller.packageName), activeTrack)) {
                 session.metadata = live
@@ -474,29 +488,26 @@ class PlaybackTracker(
 
     fun extractTrack(metadata: MediaMetadata?, sourcePackage: String): Track? {
         if (metadata == null) return null
-        var artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
-            ?: metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
-            ?: metadata.getString(MediaMetadata.METADATA_KEY_AUTHOR)
-            ?: metadata.getString(MediaMetadata.METADATA_KEY_COMPOSER)
-            ?: metadata.description?.subtitle?.toString()
-
-        var title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
-            ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
-            ?: metadata.description?.title?.toString()
-
-        if (artist.isNullOrBlank() && !title.isNullOrBlank() && title.contains(" - ")) {
-            val parts = title.split(" - ", limit = 2)
-            artist = parts[0].trim()
-            title = parts[1].trim()
+        fun firstText(vararg keys: String): String? = keys.firstNotNullOfOrNull { key ->
+            metadata.getString(key)?.trim()?.takeIf { it.isNotEmpty() }
         }
+        var artist = firstText(MediaMetadata.METADATA_KEY_ARTIST, MediaMetadata.METADATA_KEY_ALBUM_ARTIST,
+            MediaMetadata.METADATA_KEY_AUTHOR, MediaMetadata.METADATA_KEY_COMPOSER)
+            ?: metadata.description?.subtitle?.toString()?.trim()
+        var title = firstText(MediaMetadata.METADATA_KEY_TITLE, MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
+            ?: metadata.description?.title?.toString()?.trim()
 
-        if (artist.isNullOrBlank() || title.isNullOrBlank()) {
-            return null
+        if (artist.isNullOrBlank() && !title.isNullOrBlank()) {
+            val parts = title.split(Regex(" +[-–—] +"), limit = 2)
+            if (parts.size == 2) {
+                artist = parts[0].trim()
+                title = parts[1].trim()
+            }
         }
+        if (artist.isNullOrBlank() || title.isNullOrBlank()) return null
 
-        val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM)
-            ?: metadata.description?.description?.toString()
-        val albumArtist = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
+        val album = firstText(MediaMetadata.METADATA_KEY_ALBUM) ?: metadata.description?.description?.toString()?.trim()
+        val albumArtist = firstText(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
         val durationMs = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION).let {
             if (it > 0) it else null
         }
@@ -525,9 +536,10 @@ class PlaybackTracker(
     fun extractArtworkUri(metadata: MediaMetadata?): String? {
         if (metadata == null) return null
         return try {
-            metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
-                ?: metadata.getString(MediaMetadata.METADATA_KEY_ART_URI)
-                ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI)
+            listOf(MediaMetadata.METADATA_KEY_ALBUM_ART_URI, MediaMetadata.METADATA_KEY_ART_URI,
+                MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI).firstNotNullOfOrNull { key ->
+                metadata.getString(key)?.trim()?.takeIf { it.isNotEmpty() }
+            }
                 ?: metadata.description?.iconUri?.toString()
         } catch (e: Throwable) {
             null

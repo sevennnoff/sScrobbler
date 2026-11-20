@@ -195,4 +195,24 @@ class NowPlayingViewModelTest {
         assertEquals(ScrobbleStatus.WaitingForEnd, state.status)
         assertEquals(1.0f, state.thresholdProgress, 0.01f)
     }
+
+    @Test
+    fun failedPlayerUriFallsBackToLastFmForTheCurrentTrack() = runTest(testDispatcher) {
+        val track = Track(artist = "Artist", title = "Song", sourcePackage = "player")
+        val local = "content://player/missing-cover"
+        val remote = "https://example.test/cover.jpg"
+        activeTrackFlow.value = track
+        artworkUriFlow.value = local
+        coEvery { lastFmClient.getTrackArtworkUrl(track.artist, track.title) } returns remote
+        val viewModel = NowPlayingViewModel(playbackTracker, scrobbleEngine, settingsRepository, historyDao, lastFmClient, clock)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.uiState.collect() }
+        runCurrent()
+        assertEquals(local, viewModel.uiState.value.artworkUrl)
+        viewModel.reportArtworkFailure("Other artist", "Old song", local)
+        runCurrent()
+        assertEquals(local, viewModel.uiState.value.artworkUrl)
+        viewModel.reportArtworkFailure(track.artist, track.title, local)
+        runCurrent()
+        assertEquals(remote, viewModel.uiState.value.artworkUrl)
+    }
 }

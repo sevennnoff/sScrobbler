@@ -636,4 +636,30 @@ class PlaybackTrackerTest {
         coVerify(exactly = 2) { scrobbleEngine.onPlaybackStateChanged(false) }
         tracker.destroy()
     }
+
+    @Test
+    fun tickRecoversAPauseThatArrivedWithoutACallback() = runTest {
+        tracker = PlaybackTracker(scrobbleEngine, settingsRepository, authRepository, lastFmClient, networkDetector, clock, this)
+        val player = FakeMediaControllerAdapter("player", mockPlaybackState(PlaybackState.STATE_PLAYING, 1_000), mockMetadata("Song", "Artist"))
+        tracker.onActiveSessionsChanged(listOf(player))
+        runCurrent()
+        player.playbackState = mockPlaybackState(PlaybackState.STATE_PAUSED, 8_000)
+        tracker.onTick()
+        runCurrent()
+        assertFalse(tracker.isPlayingFlow.value)
+        coVerify(exactly = 1) { scrobbleEngine.onPlaybackStateChanged(false) }
+        tracker.destroy()
+    }
+
+    @Test
+    fun blankArtistAndTitleFallThroughToPlayerDisplayMetadata() = runTest {
+        tracker = PlaybackTracker(scrobbleEngine, settingsRepository, authRepository, lastFmClient, networkDetector, clock, this)
+        val metadata = mockMetadata(" ", " ")
+        coEvery { metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) } returns "Album Artist"
+        coEvery { metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE) } returns "Display title"
+        val track = tracker.extractTrack(metadata, "player")
+        assertEquals("Album Artist", track?.artist)
+        assertEquals("Display title", track?.title)
+        tracker.destroy()
+    }
 }

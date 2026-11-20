@@ -38,6 +38,7 @@ class ScrobbleEngine(
         private set
 
     private var lastKnownPositionMs: Long? = null
+    private var artworkUri: String? = null
 
     private val _statusFlow = MutableStateFlow<ScrobbleStatus>(ScrobbleStatus.Listening)
     val statusFlow: StateFlow<ScrobbleStatus> = _statusFlow.asStateFlow()
@@ -68,6 +69,7 @@ class ScrobbleEngine(
             eligible = false
         )
         currentSession = session
+        artworkUri = null
         publishSession(session)
         lastKnownPositionMs = 0L
         _statusFlow.value = ScrobbleStatus.Listening
@@ -76,6 +78,10 @@ class ScrobbleEngine(
             "START ${track.artist} - ${track.title}" +
                 (track.durationMs?.let { " (${it / 1000}s)" } ?: " (duration unknown)")
         )
+    }
+
+    fun updateArtworkUri(uri: String?) {
+        if (!uri.isNullOrBlank()) artworkUri = uri
     }
 
     fun updateTrackMetadata(track: Track) {
@@ -106,23 +112,14 @@ class ScrobbleEngine(
         val track = session.track
         val duration = track.durationMs
 
-        // Check if track repeated (Track A -> Track A again)
-        if (duration != null && duration > 0) {
-            val prevPos = lastKnownPositionMs ?: 0L
-            if (prevPos > (duration * 0.70) && positionMs < 5_000L) {
-                // Natural repeat of the same track
+        when (positionTransition(lastKnownPositionMs ?: 0L, positionMs, duration, session.isPlaying)) {
+            FinalizeReason.TrackRepeated -> {
                 finalizeCurrentSession(FinalizeReason.TrackRepeated)
                 onTrackStarted(track)
-                return
             }
-
-            // Natural end detection
-            if (positionMs >= (duration - 3_000L) && !session.isPlaying) {
-                finalizeCurrentSession(FinalizeReason.NaturalEnd)
-                return
-            }
+            FinalizeReason.NaturalEnd -> finalizeCurrentSession(FinalizeReason.NaturalEnd)
+            else -> Unit
         }
-
         lastKnownPositionMs = positionMs
     }
 
@@ -179,16 +176,15 @@ class ScrobbleEngine(
     suspend fun finalizeCurrentSession(reason: FinalizeReason = FinalizeReason.TrackChanged) {
         val session = currentSession ?: return
 
-        // Accrue any remaining play time
         session.onPauseOrStop(clock)
-        checkEligibility()
+        val currentSettings = settingsRepository.getSettings()
+        checkEligibility(currentSettings)
 
         val track = session.track
         val recordId = UUID.randomUUID().toString()
         val timestamp = session.startedAtUnix
         val durationSec = track.durationMs?.let { (it / 1000).toInt() }
         val listenedSec = (session.listenedMs / 1000).toInt()
-        val currentSettings = settingsRepository.getSettings()
         val thresholdSec = calculateThreshold(
             durationMs = track.durationMs,
             minListenedPercent = currentSettings.minListenedPercent,
@@ -210,7 +206,8 @@ class ScrobbleEngine(
             listenedSeconds = listenedSec,
             timestamp = timestamp,
             status = status,
-            sourcePackage = track.sourcePackage
+            sourcePackage = track.sourcePackage,
+            artworkUrl = artworkUri
         )
         if (session.eligible) {
             val entry = PendingScrobbleEntity(
@@ -238,6 +235,17 @@ class ScrobbleEngine(
     }
 
     companion object {
+        internal fun positionTransition(previous: Long, position: Long, duration: Long?, playing: Boolean): FinalizeReason? {
+            if (duration == null || duration <= 0) return null
+            val nearStart = position < minOf(5_000L, duration / 4)
+            val nearEnd = position >= duration - minOf(3_000L, duration / 10)
+            return when {
+                playing && position < previous && previous > duration * 0.70 && nearStart -> FinalizeReason.TrackRepeated
+                !playing && nearEnd -> FinalizeReason.NaturalEnd
+                else -> null
+            }
+        }
+
         fun calculateThreshold(
             durationMs: Long?,
             minListenedPercent: Int = 50,

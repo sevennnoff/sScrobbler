@@ -16,6 +16,7 @@ import com.sscrobbler.app.settings.SettingsRepository
 import com.sscrobbler.app.util.Clock
 import com.sscrobbler.app.util.SystemClockImpl
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
@@ -76,11 +77,25 @@ class NowPlayingViewModel(
     private val lastScrobbledFlow = historyDao.getRecentFlow(1)
     private data class Artwork(val track: Pair<String, String>, val url: String?)
 
+    private val failedPlayerArtwork = MutableStateFlow<Artwork?>(null)
+    private val playerArtworkUri = combine(
+        playbackTracker.activeTrackFlow, playbackTracker.artworkUriFlow, failedPlayerArtwork
+    ) { track, uri, failed ->
+        uri?.takeUnless { failed != null && failed.url == it && failed.track.first == track?.artist && failed.track.second == track?.title }
+    }
+
+    fun reportArtworkFailure(artist: String, title: String, uri: String) {
+        val current = playbackTracker.activeTrackFlow.value ?: return
+        if (current.artist == artist && current.title == title && playbackTracker.artworkUriFlow.value == uri) {
+            failedPlayerArtwork.value = Artwork(artist to title, uri)
+        }
+    }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     private val lastFmArtworkFlow = combine(
         playbackTracker.activeTrackFlow,
         playbackTracker.artworkBitmapFlow,
-        playbackTracker.artworkUriFlow
+        playerArtworkUri
     ) { track, bitmap, uri ->
         if (track != null && bitmap == null && uri.isNullOrBlank()) track.artist to track.title else null
     }.distinctUntilChanged().flatMapLatest { key ->
@@ -98,7 +113,7 @@ class NowPlayingViewModel(
         scrobbleEngine.currentSessionFlow,
         settingsRepository.settingsFlow,
         playbackTracker.artworkBitmapFlow,
-        playbackTracker.artworkUriFlow,
+        playerArtworkUri,
         lastScrobbledFlow,
         lastFmArtworkFlow,
         lastFmClient.connectionErrorFlow

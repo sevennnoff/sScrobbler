@@ -37,6 +37,7 @@ android {
 
     defaultConfig {
         applicationId = "com.sscrobbler.app"
+        manifestPlaceholders["appLabel"] = "@string/app_name"
         minSdk = 26
         targetSdk = 35
         versionCode = appVersionCode
@@ -67,7 +68,11 @@ android {
             )
         }
         debug {
-            if (rootProject.file("sscrobbler.jks").isFile) {
+            if (providers.gradleProperty("previewBuild").orNull == "true") {
+                applicationIdSuffix = ".preview"
+                versionNameSuffix = "-preview"
+                manifestPlaceholders["appLabel"] = "sScrobbler Preview"
+            } else if (rootProject.file("sscrobbler.jks").isFile) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }

@@ -104,6 +104,10 @@ class MediaNotificationListener : NotificationListenerService() {
         var instance: MediaNotificationListener? = null
 
         fun ensureRebound(context: Context) {
+            instance?.let { connected ->
+                connected.refreshActiveSessions()
+                return
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 try {
                     val componentName = ComponentName(context, MediaNotificationListener::class.java)
@@ -112,7 +116,6 @@ class MediaNotificationListener : NotificationListenerService() {
                     // Ignored
                 }
             }
-            instance?.refreshActiveSessions()
         }
     }
 }

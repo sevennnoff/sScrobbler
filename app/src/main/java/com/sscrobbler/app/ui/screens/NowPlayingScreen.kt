@@ -43,11 +43,14 @@ import com.sscrobbler.app.ui.viewmodel.NowPlayingViewModel
 @Composable
 fun NowPlayingScreen(viewModel: NowPlayingViewModel, modifier: Modifier = Modifier) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    NowPlayingContent(state, modifier)
+    NowPlayingContent(state, modifier, viewModel::reportArtworkFailure)
 }
 
 @Composable
-internal fun NowPlayingContent(state: NowPlayingUiState, modifier: Modifier = Modifier) {
+internal fun NowPlayingContent(
+    state: NowPlayingUiState, modifier: Modifier = Modifier,
+    onArtworkError: (String, String, String) -> Unit
+) {
     BoxWithConstraints(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         val wide = maxWidth >= 600.dp
         val coverSize = if (wide) 208.dp else (maxHeight * 0.41f).coerceIn(148.dp, 320.dp)
@@ -76,13 +79,13 @@ internal fun NowPlayingContent(state: NowPlayingUiState, modifier: Modifier = Mo
                     if (wide) {
                         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                            CoverArt(track, state.artwork, state.artworkUrl, state.isPlaying, Modifier.size(coverSize))
+                            CoverArt(track, state.artwork, state.artworkUrl, state.isPlaying, Modifier.size(coverSize), onArtworkError)
                             TrackDetails(state, track, Modifier.weight(1f))
                         }
                     } else {
                         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                             CoverArt(track, state.artwork, state.artworkUrl, state.isPlaying,
-                                Modifier.align(Alignment.CenterHorizontally).size(coverSize))
+                                Modifier.align(Alignment.CenterHorizontally).size(coverSize), onArtworkError)
                             TrackDetails(state, track, Modifier.fillMaxWidth())
                         }
                     }
@@ -97,7 +100,10 @@ private data class Cover(val bitmap: Bitmap?, val url: String?, val artist: Stri
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun CoverArt(track: Track, bitmap: Bitmap?, url: String?, playing: Boolean, modifier: Modifier) {
+private fun CoverArt(
+    track: Track, bitmap: Bitmap?, url: String?, playing: Boolean, modifier: Modifier,
+    onArtworkError: (String, String, String) -> Unit
+) {
     val corner by animateDpAsState(if (playing) 44.dp else 16.dp,
         animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(), label = "cover corners")
     val shape = RoundedCornerShape(topStart = corner, topEnd = 16.dp, bottomEnd = corner, bottomStart = 16.dp)
@@ -114,7 +120,7 @@ private fun CoverArt(track: Track, bitmap: Bitmap?, url: String?, playing: Boole
                     Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else if (!cover.url.isNullOrBlank()) {
                 AsyncImage(model = cover.url, contentDescription = null, modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop)
+                    contentScale = ContentScale.Crop, onError = { onArtworkError(cover.artist, cover.title, cover.url) })
             }
         }
     }
