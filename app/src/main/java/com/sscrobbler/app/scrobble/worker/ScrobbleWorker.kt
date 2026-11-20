@@ -12,125 +12,71 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.sscrobbler.app.SScrobblerApplication
 import com.sscrobbler.app.database.PendingScrobbleDao
-import com.sscrobbler.app.database.HistoryDao
 import com.sscrobbler.app.lastfm.LastFmAuthRepository
 import com.sscrobbler.app.lastfm.LastFmClient
 import com.sscrobbler.app.lastfm.LastFmResult
-import com.sscrobbler.app.model.ScrobbleStatus
-import com.sscrobbler.app.util.HashUtils
+import com.sscrobbler.app.util.DebugLog
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import com.sscrobbler.app.util.NetworkDetector
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-class ScrobbleWorker(
+class ScrobbleWorker @JvmOverloads constructor(
     appContext: Context,
     params: WorkerParameters,
     private val pendingScrobbleDaoOverride: PendingScrobbleDao? = null,
-    private val historyDaoOverride: HistoryDao? = null,
     private val lastFmClientOverride: LastFmClient? = null,
     private val authRepositoryOverride: LastFmAuthRepository? = null,
     private val networkDetectorOverride: NetworkDetector? = null
 ) : CoroutineWorker(appContext, params) {
 
-    override suspend fun doWork(): Result {
+    override suspend fun doWork(): Result = uploadMutex.withLock {
         val app = applicationContext as? SScrobblerApplication
-        val pendingDao = pendingScrobbleDaoOverride ?: app?.database?.pendingScrobbleDao() ?: return Result.failure()
-        val historyDao = historyDaoOverride ?: app?.database?.historyDao() ?: return Result.failure()
-        val lastFmClient = lastFmClientOverride ?: app?.lastFmClient ?: return Result.failure()
-        val authRepo = authRepositoryOverride ?: app?.authRepository ?: return Result.failure()
-        val networkDetector = networkDetectorOverride ?: app?.networkDetector
-
-        if (networkDetector != null && !networkDetector.isOnline()) {
-            com.sscrobbler.app.util.DebugLog.log("WORKER", "skipped: offline")
-            return Result.retry()
-        }
-
-        val sessionKey = authRepo.getSessionKey()
-        if (sessionKey.isNullOrBlank()) {
-            // Cannot scrobble without auth session
-            com.sscrobbler.app.util.DebugLog.log("WORKER", "skipped: no session key")
-            return Result.failure()
-        }
+        val dao = pendingScrobbleDaoOverride ?: app?.database?.pendingScrobbleDao() ?: return Result.failure()
+        val client = lastFmClientOverride ?: app?.lastFmClient ?: return Result.failure()
+        val auth = authRepositoryOverride ?: app?.authRepository ?: return Result.failure()
+        val network = networkDetectorOverride ?: app?.networkDetector
+        if (network?.isOnline() == false) return Result.retry()
 
         try {
-            var hasMore = true
-            while (hasMore) {
-                // Fetch up to 50 items
-                val batch = pendingDao.getBatch(BATCH_SIZE)
-                if (batch.isEmpty()) {
-                    hasMore = false
-                    break
-                }
-
-                // Verify fingerprints / deduplicate batch before sending
-                val uniqueBatch = batch.distinctBy { item ->
-                    item.fingerprint.ifBlank {
-                        HashUtils.sha256("${item.artist}|${item.title}|${item.timestamp}")
-                    }
-                }
-
-                val scrobbleResult = lastFmClient.scrobbleBatch(uniqueBatch, sessionKey)
-                when (scrobbleResult) {
+            val key = auth.getSessionKey()
+            if (key.isNullOrBlank()) return Result.success() // Signing in schedules another upload.
+            while (true) {
+                val batch = dao.getBatch(BATCH_SIZE)
+                if (batch.isEmpty()) break
+                when (val result = client.scrobbleBatch(batch, key)) {
                     is LastFmResult.Success -> {
-                        val ids = batch.map { it.id }
-                        pendingDao.deleteByIds(ids)
-                        for (id in ids) {
-                            historyDao.updateStatus(id, ScrobbleStatus.Scrobbled)
-                        }
-                        com.sscrobbler.app.util.DebugLog.log("WORKER", "batch sent: ${batch.size} scrobble(s)")
-                        if (batch.size < BATCH_SIZE) {
-                            hasMore = false
-                        }
-                    }
-                    is LastFmResult.Error -> {
-                        com.sscrobbler.app.util.DebugLog.log(
-                            "WORKER",
-                            "batch failed: ${scrobbleResult.message} (code ${scrobbleResult.code})"
-                        )
-                        val throwable = scrobbleResult.throwable
-                        val isNetworkIssue = throwable is IOException ||
-                                (scrobbleResult.message.contains("network", ignoreCase = true)) ||
-                                scrobbleResult.code == null ||
-                                scrobbleResult.code in RETRYABLE_LASTFM_ERRORS
-
-                        return if (isNetworkIssue) {
-                            Result.retry()
-                        } else {
-                            // Fatal API error for this batch (e.g. invalid auth or invalid params)
-                            if (scrobbleResult.code == 4 || scrobbleResult.code == 9 || scrobbleResult.code == 14) {
-                                // Invalid session key / token
-                                Result.failure()
-                            } else {
-                                // Mark items failed and discard from pending queue
-                                val ids = batch.map { it.id }
-                                pendingDao.deleteByIds(ids)
-                                for (id in ids) {
-                                    historyDao.updateStatus(id, ScrobbleStatus.Failed)
-                                }
-                                Result.failure()
+                        if (result.data.size != batch.size) return Result.retry()
+                        val accepted = mutableListOf<String>()
+                        val rejected = mutableListOf<String>()
+                        batch.zip(result.data).forEach { (item, code) ->
+                            when (code) {
+                                0 -> accepted.add(item.id)
+                                1, 2, 3 -> rejected.add(item.id)
                             }
                         }
+                        if (accepted.isNotEmpty() || rejected.isNotEmpty()) dao.completeBatch(accepted, rejected)
+                        // Future timestamps, daily limits and unknown outcomes stay queued.
+                        if (accepted.size + rejected.size < batch.size) return Result.retry()
+                    }
+                    is LastFmResult.Error -> {
+                        DebugLog.log("WORKER", "Upload deferred: ${result.message}")
+                        return if (result.code in setOf(4, 9, 10, 14, 26)) Result.failure() else Result.retry()
                     }
                 }
             }
-            return Result.success()
+            Result.success()
         } catch (e: IOException) {
-            return Result.retry()
-        } catch (e: Exception) {
-            return Result.failure()
+            Result.retry()
         }
     }
 
     companion object {
+        private val uploadMutex = Mutex()
         const val WORK_NAME_PERIODIC = "ScrobbleWorkerPeriodic"
         const val WORK_NAME_ONE_TIME = "ScrobbleWorkerOneTime"
         const val BATCH_SIZE = 50
-
-        // Last.fm error codes that indicate temporary/retryable issues
-        // 11: Service Offline - This service is temporarily offline. Try again later.
-        // 16: There was a temporary error processing your request. Please try again.
-        // 29: Rate limit exceeded.
-        val RETRYABLE_LASTFM_ERRORS = setOf(11, 16, 29)
 
         fun schedulePeriodic(context: Context) {
             val constraints = Constraints.Builder()
@@ -159,7 +105,7 @@ class ScrobbleWorker(
 
             WorkManager.getInstance(context).enqueueUniqueWork(
                 WORK_NAME_ONE_TIME,
-                ExistingWorkPolicy.REPLACE,
+                ExistingWorkPolicy.KEEP,
                 request
             )
         }

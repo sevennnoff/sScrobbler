@@ -602,4 +602,64 @@ class PlaybackTrackerTest {
 
         tracker.destroy()
     }
+
+    @Test
+    fun replacementSessionFromSamePackageIgnoresLateCallbacksFromOldToken() = runTest {
+        tracker = PlaybackTracker(scrobbleEngine, settingsRepository, authRepository, lastFmClient, networkDetector, clock, this)
+        val first = FakeMediaControllerAdapter("player", mockPlaybackState(PlaybackState.STATE_PLAYING, 0), mockMetadata("First", "Artist"))
+        val next = FakeMediaControllerAdapter("player", mockPlaybackState(PlaybackState.STATE_PLAYING, 0), mockMetadata("Second", "Artist"))
+        tracker.onActiveSessionsChanged(listOf(first))
+        runCurrent()
+        val stale = first.callbacks.single()
+        tracker.onActiveSessionsChanged(listOf(next))
+        stale.onSessionDestroyed()
+        stale.onPlaybackStateChanged(mockPlaybackState(PlaybackState.STATE_STOPPED, 0))
+        runCurrent()
+        assertTrue(first.callbacks.isEmpty())
+        assertEquals("Second", tracker.activeTrackFlow.value?.title)
+        assertTrue(tracker.isPlayingFlow.value)
+        coVerify(exactly = 1) { scrobbleEngine.onTrackStarted(match { it.title == "Second" }) }
+        tracker.destroy()
+    }
+
+    @Test
+    fun metadataWhilePausedKeepsNewTrackPaused() = runTest {
+        tracker = PlaybackTracker(scrobbleEngine, settingsRepository, authRepository, lastFmClient, networkDetector, clock, this)
+        val player = FakeMediaControllerAdapter("player", mockPlaybackState(PlaybackState.STATE_PLAYING, 0), mockMetadata("First", "Artist"))
+        tracker.onActiveSessionsChanged(listOf(player))
+        runCurrent()
+        player.dispatchPlaybackState(mockPlaybackState(PlaybackState.STATE_PAUSED, 10_000))
+        player.dispatchMetadata(mockMetadata("Second", "Artist"))
+        runCurrent()
+        assertEquals("Second", tracker.activeTrackFlow.value?.title)
+        assertFalse(tracker.isPlayingFlow.value)
+        coVerify(exactly = 2) { scrobbleEngine.onPlaybackStateChanged(false) }
+        tracker.destroy()
+    }
+
+    @Test
+    fun tickRecoversAPauseThatArrivedWithoutACallback() = runTest {
+        tracker = PlaybackTracker(scrobbleEngine, settingsRepository, authRepository, lastFmClient, networkDetector, clock, this)
+        val player = FakeMediaControllerAdapter("player", mockPlaybackState(PlaybackState.STATE_PLAYING, 1_000), mockMetadata("Song", "Artist"))
+        tracker.onActiveSessionsChanged(listOf(player))
+        runCurrent()
+        player.playbackState = mockPlaybackState(PlaybackState.STATE_PAUSED, 8_000)
+        tracker.onTick()
+        runCurrent()
+        assertFalse(tracker.isPlayingFlow.value)
+        coVerify(exactly = 1) { scrobbleEngine.onPlaybackStateChanged(false) }
+        tracker.destroy()
+    }
+
+    @Test
+    fun blankArtistAndTitleFallThroughToPlayerDisplayMetadata() = runTest {
+        tracker = PlaybackTracker(scrobbleEngine, settingsRepository, authRepository, lastFmClient, networkDetector, clock, this)
+        val metadata = mockMetadata(" ", " ")
+        coEvery { metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) } returns "Album Artist"
+        coEvery { metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE) } returns "Display title"
+        val track = tracker.extractTrack(metadata, "player")
+        assertEquals("Album Artist", track?.artist)
+        assertEquals("Display title", track?.title)
+        tracker.destroy()
+    }
 }

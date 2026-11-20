@@ -30,7 +30,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,7 +54,7 @@ fun AppsScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
 
     Column(modifier = modifier.fillMaxSize()) {
         // App Bar Header
@@ -90,7 +92,7 @@ fun AppsScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // Quick Batch Action Buttons
-            item {
+            if (state.appSources.isNotEmpty()) item {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -126,7 +128,7 @@ fun AppsScreen(
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         shape = CardShape,
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
                     ) {
                         Column(
                             modifier = Modifier
@@ -142,7 +144,7 @@ fun AppsScreen(
                                 modifier = Modifier.size(36.dp)
                             )
                             Text(
-                                text = "Scanning for players...",
+                                text = "No players found yet",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
@@ -190,11 +192,12 @@ fun AppSourceCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = CardShape,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .toggleable(value = appSource.isEnabled, role = Role.Switch, onValueChange = onToggle)
                 .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)
@@ -207,7 +210,7 @@ fun AppSourceCard(
                 if (appSource.iconBitmap != null) {
                     Image(
                         bitmap = appSource.iconBitmap.asImageBitmap(),
-                        contentDescription = appSource.displayName,
+                        contentDescription = null,
                         modifier = Modifier
                             .fillMaxSize()
                             .clip(ChipShape),
@@ -248,7 +251,7 @@ fun AppSourceCard(
 
             Switch(
                 checked = appSource.isEnabled,
-                onCheckedChange = onToggle
+                onCheckedChange = null
             )
         }
     }

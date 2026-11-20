@@ -37,6 +37,7 @@ android {
 
     defaultConfig {
         applicationId = "com.sscrobbler.app"
+        manifestPlaceholders["appLabel"] = "@string/app_name"
         minSdk = 26
         targetSdk = 35
         versionCode = appVersionCode
@@ -67,7 +68,13 @@ android {
             )
         }
         debug {
-            signingConfig = signingConfigs.getByName("release")
+            if (providers.gradleProperty("previewBuild").orNull == "true") {
+                applicationIdSuffix = ".preview"
+                versionNameSuffix = "-preview"
+                manifestPlaceholders["appLabel"] = "sScrobbler Preview"
+            } else if (rootProject.file("sscrobbler.jks").isFile) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -89,6 +96,7 @@ android {
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
 
@@ -131,5 +139,6 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

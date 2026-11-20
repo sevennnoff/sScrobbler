@@ -39,7 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,13 +71,15 @@ private fun LogEntry.isError(): Boolean {
     return tag == "ERROR" || "error" in lower || "fail" in lower || "skip" in lower
 }
 
-private fun tagColor(tag: String): Color = when (tag) {
-    "API" -> Color(0xFF7DD3FC)
-    "ENGINE" -> Color(0xFF86EFAC)
-    "TRACK" -> Color(0xFFFDE68A)
-    "NP" -> Color(0xFFC4B5FD)
-    "ERROR" -> Color(0xFFFCA5A5)
-    else -> Color(0xFFE5E7EB)
+@Composable
+private fun tagColor(tag: String): Color {
+    val scheme = MaterialTheme.colorScheme
+    return when (tag) {
+        "API", "NP" -> scheme.primary
+        "ENGINE", "WORKER" -> scheme.tertiary
+        "ERROR" -> scheme.error
+        else -> scheme.onSurfaceVariant
+    }
 }
 
 @Composable
@@ -87,7 +89,7 @@ fun DebugScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val entries by DebugLog.entries.collectAsState()
+    val entries by DebugLog.entries.collectAsStateWithLifecycle()
     var filter by remember { mutableStateOf("All") }
     val listState = rememberLazyListState()
 
@@ -149,7 +151,7 @@ fun DebugScreen(
         // Session summary
         Card(
             shape = CardShape,
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {

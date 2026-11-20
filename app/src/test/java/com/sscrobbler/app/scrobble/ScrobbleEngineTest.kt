@@ -4,15 +4,11 @@ import com.sscrobbler.app.database.HistoryDao
 import com.sscrobbler.app.database.HistoryItemEntity
 import com.sscrobbler.app.database.PendingScrobbleDao
 import com.sscrobbler.app.database.PendingScrobbleEntity
-import com.sscrobbler.app.lastfm.LastFmAuthRepository
-import com.sscrobbler.app.lastfm.LastFmClient
-import com.sscrobbler.app.lastfm.LastFmResult
 import com.sscrobbler.app.model.ScrobbleStatus
 import com.sscrobbler.app.model.Track
 import com.sscrobbler.app.settings.AppSettings
 import com.sscrobbler.app.settings.SettingsRepository
 import com.sscrobbler.app.util.Clock
-import com.sscrobbler.app.util.NetworkDetector
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
@@ -29,29 +25,21 @@ class ScrobbleEngineTest {
     private lateinit var clock: TestClock
     private lateinit var pendingScrobbleDao: FakePendingScrobbleDao
     private lateinit var historyDao: FakeHistoryDao
-    private lateinit var lastFmClient: FakeLastFmClient
-    private lateinit var authRepository: FakeLastFmAuthRepository
+    private var uploadsScheduled = 0
     private lateinit var settingsRepository: FakeSettingsRepository
-    private lateinit var networkDetector: FakeNetworkDetector
     private lateinit var engine: ScrobbleEngine
 
     @Before
     fun setUp() {
         clock = TestClock()
-        pendingScrobbleDao = FakePendingScrobbleDao()
         historyDao = FakeHistoryDao()
-        lastFmClient = FakeLastFmClient()
-        authRepository = FakeLastFmAuthRepository("test_session_key")
+        pendingScrobbleDao = FakePendingScrobbleDao(historyDao)
         settingsRepository = FakeSettingsRepository()
-        networkDetector = FakeNetworkDetector(online = true)
-
         engine = ScrobbleEngine(
             pendingScrobbleDao = pendingScrobbleDao,
             historyDao = historyDao,
-            lastFmClient = lastFmClient,
-            authRepository = authRepository,
             settingsRepository = settingsRepository,
-            networkDetector = networkDetector,
+            scheduleUpload = { uploadsScheduled++ },
             clock = clock
         )
     }
@@ -86,7 +74,7 @@ class ScrobbleEngineTest {
         engine.onTrackStarted(track2)
 
         // Track 1 should not have been scrobbled to Last.fm
-        assertEquals(0, lastFmClient.scrobbledCalls.size)
+        assertEquals(0, uploadsScheduled)
         // Should be recorded in history as Skipped
         val history = historyDao.items
         assertEquals(1, history.size)
@@ -118,7 +106,7 @@ class ScrobbleEngineTest {
         assertEquals(ScrobbleStatus.WaitingForEnd, engine.statusFlow.value)
 
         // Last.fm API must NOT be called at this moment!
-        assertEquals("Last.fm scrobble API must NOT be called while track is still playing", 0, lastFmClient.scrobbledCalls.size)
+        assertEquals("Last.fm scrobble API must NOT be called while track is still playing", 0, uploadsScheduled)
         assertEquals(0, pendingScrobbleDao.items.size)
     }
 
@@ -145,7 +133,7 @@ class ScrobbleEngineTest {
         assertEquals(ScrobbleStatus.Eligible, engine.statusFlow.value)
 
         // Still NOT scrobbled
-        assertEquals("Last.fm scrobble API must not be called upon pause", 0, lastFmClient.scrobbledCalls.size)
+        assertEquals("Last.fm scrobble API must not be called upon pause", 0, uploadsScheduled)
         assertEquals(0, pendingScrobbleDao.items.size)
     }
 
@@ -176,19 +164,18 @@ class ScrobbleEngineTest {
         // User switches to next track
         engine.onTrackStarted(track2)
 
-        // Exactly 1 scrobble call made
-        assertEquals(1, lastFmClient.scrobbledCalls.size)
-        val scrobble = lastFmClient.scrobbledCalls[0]
+        // Exactly one upload was scheduled.
+        assertEquals(1, uploadsScheduled)
+        val scrobble = pendingScrobbleDao.items.single()
         assertEquals("Lana Del Rey", scrobble.artist)
-        assertEquals("National Anthem", scrobble.track)
+        assertEquals("National Anthem", scrobble.title)
 
-        // History shows Scrobbled
+        // The worker acknowledges delivery after Last.fm confirms the item.
         val history = historyDao.items
         assertEquals(1, history.size)
         assertEquals("National Anthem", history[0].title)
-        assertEquals(ScrobbleStatus.Scrobbled, history[0].status)
-        // Pending queue is cleaned up after successful online scrobble
-        assertEquals(0, pendingScrobbleDao.items.size)
+        assertEquals(ScrobbleStatus.Pending, history[0].status)
+        assertEquals(1, pendingScrobbleDao.items.size)
     }
 
     // 5) PLAY 30s -> seek +3 min -> PLAY 30s -> NEXT -> 60s listened (monotonic clock)
@@ -230,7 +217,7 @@ class ScrobbleEngineTest {
         engine.onTrackStarted(track2)
 
         // Result: Skipped, 60s recorded
-        assertEquals(0, lastFmClient.scrobbledCalls.size)
+        assertEquals(0, uploadsScheduled)
         val history = historyDao.items
         assertEquals(1, history.size)
         assertEquals(ScrobbleStatus.Skipped, history[0].status)
@@ -267,13 +254,13 @@ class ScrobbleEngineTest {
         engine.onPlaybackStopped()
 
         // 2 separate scrobbles and 2 separate history records
-        assertEquals(2, lastFmClient.scrobbledCalls.size)
+        assertEquals(2, uploadsScheduled)
         val history = historyDao.items
         assertEquals(2, history.size)
         assertEquals(trackA.title, history[0].title)
         assertEquals(trackA.title, history[1].title)
-        assertEquals(ScrobbleStatus.Scrobbled, history[0].status)
-        assertEquals(ScrobbleStatus.Scrobbled, history[1].status)
+        assertEquals(ScrobbleStatus.Pending, history[0].status)
+        assertEquals(ScrobbleStatus.Pending, history[1].status)
     }
 
     // 7) Eligible -> offline -> NEXT -> Pending -> онлайн -> Scrobbled
@@ -300,14 +287,10 @@ class ScrobbleEngineTest {
         engine.onTimeTick()
         assertTrue(engine.currentSession!!.eligible)
 
-        // Go offline
-        networkDetector.online = false
-
         // NEXT track starts
         engine.onTrackStarted(track2)
 
-        // Last.fm should NOT have been called directly since we were offline
-        assertEquals(0, lastFmClient.scrobbledCalls.size)
+        assertEquals(1, uploadsScheduled)
 
         // Room has PendingScrobbleEntity saved
         assertEquals(1, pendingScrobbleDao.items.size)
@@ -318,22 +301,28 @@ class ScrobbleEngineTest {
         assertEquals(1, historyDao.items.size)
         assertEquals(ScrobbleStatus.Pending, historyDao.items[0].status)
 
-        // Now internet comes back online!
-        networkDetector.online = true
+        assertEquals(historyDao.items.single().id, pending.id)
+        pendingScrobbleDao.completeBatch(listOf(pending.id), emptyList())
+        assertTrue(pendingScrobbleDao.items.isEmpty())
+        assertEquals(ScrobbleStatus.Scrobbled, historyDao.items.single().status)
+    }
 
-        // WorkManager / sync processes pending queue
-        val processedCount = engine.processPendingQueue()
-        assertEquals(1, processedCount)
+    @Test
+    fun advancingThroughAShortTrackIsNotARepeat() {
+        assertNull(ScrobbleEngine.positionTransition(3_800, 4_100, 5_000, true))
+    }
 
-        // Successfully scrobbled batch
-        assertEquals(1, lastFmClient.batchScrobbledCalls.size)
-        assertEquals("Venice Bitch", lastFmClient.batchScrobbledCalls[0][0].title)
-
-        // Pending queue is cleared
-        assertEquals(0, pendingScrobbleDao.items.size)
-
-        // History status is updated to Scrobbled
-        assertEquals(ScrobbleStatus.Scrobbled, historyDao.items[0].status)
+    @Test
+    fun lateDurationChangesEligibilityWithoutRestartingListening() = runTest {
+        val track = Track(artist = "Artist", title = "Track", durationMs = null, sourcePackage = "player")
+        engine.onTrackStarted(track)
+        clock.advance(40_000)
+        engine.updateTrackMetadata(track.copy(durationMs = 70_000))
+        engine.updateArtworkUri("content://player/cover")
+        engine.onPlaybackStopped()
+        assertEquals(40, historyDao.items.single().listenedSeconds)
+        assertEquals("content://player/cover", historyDao.items.single().artworkUrl)
+        assertEquals(70, pendingScrobbleDao.items.single().durationSeconds)
     }
 }
 
@@ -352,11 +341,12 @@ class TestClock(
     }
 }
 
-class FakeNetworkDetector(var online: Boolean = true) : NetworkDetector {
-    override fun isOnline(): Boolean = online
-}
+class FakePendingScrobbleDao(private val historyDao: HistoryDao) : PendingScrobbleDao {
+    override suspend fun putHistory(item: HistoryItemEntity) = historyDao.insert(item)
+    override suspend fun setHistoryStatus(ids: List<String>, status: ScrobbleStatus) {
+        ids.forEach { historyDao.updateStatus(it, status) }
+    }
 
-class FakePendingScrobbleDao : PendingScrobbleDao {
     val items = mutableListOf<PendingScrobbleEntity>()
 
     override suspend fun insert(pendingScrobble: PendingScrobbleEntity): Long {
@@ -411,68 +401,6 @@ class FakeHistoryDao : HistoryDao {
     }
     override suspend fun deleteById(id: String) { items.removeAll { it.id == id } }
     override suspend fun deleteAll() { items.clear() }
-}
-
-data class ScrobbleCall(
-    val artist: String,
-    val track: String,
-    val timestamp: Long,
-    val album: String?,
-    val albumArtist: String?,
-    val durationSeconds: Int?,
-    val sessionKey: String
-)
-
-class FakeLastFmClient : LastFmClient() {
-    val scrobbledCalls = mutableListOf<ScrobbleCall>()
-    val batchScrobbledCalls = mutableListOf<List<PendingScrobbleEntity>>()
-    var updateNowPlayingCalls = 0
-
-    override suspend fun updateNowPlaying(
-        artist: String,
-        track: String,
-        album: String?,
-        albumArtist: String?,
-        durationSeconds: Int?,
-        sessionKey: String
-    ): LastFmResult<Unit> {
-        updateNowPlayingCalls++
-        return LastFmResult.Success(Unit)
-    }
-
-    override suspend fun scrobble(
-        artist: String,
-        track: String,
-        timestamp: Long,
-        album: String?,
-        albumArtist: String?,
-        durationSeconds: Int?,
-        sessionKey: String
-    ): LastFmResult<Unit> {
-        scrobbledCalls.add(
-            ScrobbleCall(artist, track, timestamp, album, albumArtist, durationSeconds, sessionKey)
-        )
-        return LastFmResult.Success(Unit)
-    }
-
-    override suspend fun scrobbleBatch(
-        items: List<PendingScrobbleEntity>,
-        sessionKey: String
-    ): LastFmResult<Unit> {
-        batchScrobbledCalls.add(items)
-        return LastFmResult.Success(Unit)
-    }
-}
-
-class FakeLastFmAuthRepository(private var key: String? = null) : LastFmAuthRepository() {
-    override suspend fun getSessionKey(): String? = key
-    override suspend fun getUsername(): String? = "test_user"
-    override suspend fun saveSession(username: String, sessionKey: String) {
-        key = sessionKey
-    }
-    override suspend fun clearSession() {
-        key = null
-    }
 }
 
 class FakeSettingsRepository(private var settings: AppSettings = AppSettings()) : SettingsRepository() {

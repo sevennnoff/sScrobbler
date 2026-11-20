@@ -3,13 +3,11 @@ package com.sscrobbler.app.scrobble.worker
 import android.content.Context
 import androidx.work.ListenableWorker
 import androidx.work.WorkerParameters
-import com.sscrobbler.app.database.HistoryDao
 import com.sscrobbler.app.database.PendingScrobbleDao
 import com.sscrobbler.app.database.PendingScrobbleEntity
 import com.sscrobbler.app.lastfm.LastFmAuthRepository
 import com.sscrobbler.app.lastfm.LastFmClient
 import com.sscrobbler.app.lastfm.LastFmResult
-import com.sscrobbler.app.model.ScrobbleStatus
 import com.sscrobbler.app.util.HashUtils
 import com.sscrobbler.app.util.NetworkDetector
 import io.mockk.coEvery
@@ -27,7 +25,6 @@ class ScrobbleWorkerTest {
     private lateinit var context: Context
     private lateinit var workerParams: WorkerParameters
     private lateinit var pendingScrobbleDao: PendingScrobbleDao
-    private lateinit var historyDao: HistoryDao
     private lateinit var lastFmClient: LastFmClient
     private lateinit var authRepository: LastFmAuthRepository
     private lateinit var networkDetector: NetworkDetector
@@ -37,7 +34,6 @@ class ScrobbleWorkerTest {
         context = mockk(relaxed = true)
         workerParams = mockk(relaxed = true)
         pendingScrobbleDao = mockk(relaxed = true)
-        historyDao = mockk(relaxed = true)
         lastFmClient = mockk(relaxed = true)
         authRepository = mockk(relaxed = true)
         networkDetector = mockk(relaxed = true)
@@ -71,7 +67,6 @@ class ScrobbleWorkerTest {
             appContext = context,
             params = workerParams,
             pendingScrobbleDaoOverride = pendingScrobbleDao,
-            historyDaoOverride = historyDao,
             lastFmClientOverride = lastFmClient,
             authRepositoryOverride = authRepository,
             networkDetectorOverride = networkDetector
@@ -90,7 +85,6 @@ class ScrobbleWorkerTest {
             appContext = context,
             params = workerParams,
             pendingScrobbleDaoOverride = pendingScrobbleDao,
-            historyDaoOverride = historyDao,
             lastFmClientOverride = lastFmClient,
             authRepositoryOverride = authRepository,
             networkDetectorOverride = networkDetector
@@ -105,13 +99,12 @@ class ScrobbleWorkerTest {
     fun testSuccessfulBatch_deletesFromPendingAndMarksHistoryScrobbled() = runTest {
         val batch = createSampleEntities(5)
         coEvery { pendingScrobbleDao.getBatch(50) } returnsMany listOf(batch, emptyList())
-        coEvery { lastFmClient.scrobbleBatch(any(), any()) } returns LastFmResult.Success(Unit)
+        coEvery { lastFmClient.scrobbleBatch(any(), any()) } coAnswers { LastFmResult.Success(firstArg<List<PendingScrobbleEntity>>().map { 0 }) }
 
         val worker = ScrobbleWorker(
             appContext = context,
             params = workerParams,
             pendingScrobbleDaoOverride = pendingScrobbleDao,
-            historyDaoOverride = historyDao,
             lastFmClientOverride = lastFmClient,
             authRepositoryOverride = authRepository,
             networkDetectorOverride = networkDetector
@@ -121,10 +114,17 @@ class ScrobbleWorkerTest {
         assertEquals(ListenableWorker.Result.success(), result)
 
         coVerify(exactly = 1) { lastFmClient.scrobbleBatch(match { it.size == 5 }, "valid_session_key") }
-        coVerify(exactly = 1) { pendingScrobbleDao.deleteByIds(batch.map { it.id }) }
-        batch.forEach { item ->
-            coVerify(exactly = 1) { historyDao.updateStatus(item.id, ScrobbleStatus.Scrobbled) }
-        }
+        coVerify(exactly = 1) { pendingScrobbleDao.completeBatch(batch.map { it.id }, emptyList()) }
+    }
+
+    @Test
+    fun mixedReceiptSettlesConfirmedRowsAndRetriesDailyLimit() = runTest {
+        val batch = createSampleEntities(3)
+        coEvery { pendingScrobbleDao.getBatch(50) } returns batch
+        coEvery { lastFmClient.scrobbleBatch(any(), any()) } returns LastFmResult.Success(listOf(0, 2, 5))
+        val worker = ScrobbleWorker(context, workerParams, pendingScrobbleDao, lastFmClient, authRepository, networkDetector)
+        assertEquals(ListenableWorker.Result.retry(), worker.doWork())
+        coVerify(exactly = 1) { pendingScrobbleDao.completeBatch(listOf("item-1"), listOf("item-2")) }
     }
 
     @Test
@@ -141,7 +141,6 @@ class ScrobbleWorkerTest {
             appContext = context,
             params = workerParams,
             pendingScrobbleDaoOverride = pendingScrobbleDao,
-            historyDaoOverride = historyDao,
             lastFmClientOverride = lastFmClient,
             authRepositoryOverride = authRepository,
             networkDetectorOverride = networkDetector
@@ -151,8 +150,7 @@ class ScrobbleWorkerTest {
         assertEquals(ListenableWorker.Result.retry(), result)
 
         // Pending items must NOT be deleted
-        coVerify(exactly = 0) { pendingScrobbleDao.deleteByIds(any()) }
-        coVerify(exactly = 0) { historyDao.updateStatus(any(), any()) }
+        coVerify(exactly = 0) { pendingScrobbleDao.completeBatch(any(), any()) }
     }
 
     @Test
@@ -169,7 +167,6 @@ class ScrobbleWorkerTest {
             appContext = context,
             params = workerParams,
             pendingScrobbleDaoOverride = pendingScrobbleDao,
-            historyDaoOverride = historyDao,
             lastFmClientOverride = lastFmClient,
             authRepositoryOverride = authRepository,
             networkDetectorOverride = networkDetector
@@ -178,7 +175,7 @@ class ScrobbleWorkerTest {
         val result = worker.doWork()
         assertEquals(ListenableWorker.Result.retry(), result)
 
-        coVerify(exactly = 0) { pendingScrobbleDao.deleteByIds(any()) }
+        coVerify(exactly = 0) { pendingScrobbleDao.completeBatch(any(), any()) }
     }
 
     @Test
@@ -200,13 +197,12 @@ class ScrobbleWorkerTest {
         }
 
         coEvery { pendingScrobbleDao.getBatch(50) } returnsMany listOf(firstBatch, secondBatch, emptyList())
-        coEvery { lastFmClient.scrobbleBatch(any(), any()) } returns LastFmResult.Success(Unit)
+        coEvery { lastFmClient.scrobbleBatch(any(), any()) } coAnswers { LastFmResult.Success(firstArg<List<PendingScrobbleEntity>>().map { 0 }) }
 
         val worker = ScrobbleWorker(
             appContext = context,
             params = workerParams,
             pendingScrobbleDaoOverride = pendingScrobbleDao,
-            historyDaoOverride = historyDao,
             lastFmClientOverride = lastFmClient,
             authRepositoryOverride = authRepository,
             networkDetectorOverride = networkDetector
@@ -216,7 +212,7 @@ class ScrobbleWorkerTest {
         assertEquals(ListenableWorker.Result.success(), result)
 
         coVerify(exactly = 2) { lastFmClient.scrobbleBatch(any(), "valid_session_key") }
-        coVerify(exactly = 1) { pendingScrobbleDao.deleteByIds(firstBatch.map { it.id }) }
-        coVerify(exactly = 1) { pendingScrobbleDao.deleteByIds(secondBatch.map { it.id }) }
+        coVerify(exactly = 1) { pendingScrobbleDao.completeBatch(firstBatch.map { it.id }, emptyList()) }
+        coVerify(exactly = 1) { pendingScrobbleDao.completeBatch(secondBatch.map { it.id }, emptyList()) }
     }
 }

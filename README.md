@@ -21,16 +21,16 @@ Most Android scrobblers suffer from two extremes: they either blast Last.fm the 
 
 **sScrobbler** takes a clean, deterministic approach:
 - **Eligible first, submitted on finalize:** Tracks reach `eligible` status when you listen to `min(50%, 4 min)` (minimum 30s). The scrobble is only dispatched to Last.fm when the track actually ends, repeats, or transitions to the next song.
-- **Immediate Now Playing cleanup:** When you pause a song, Now Playing status in your Last.fm profile is wiped immediately rather than hanging for minutes.
+- **Pause and resume:** The local player stops counting as soon as playback pauses. Last.fm expires its own Now Playing entry.
 - **Repeat loop detection:** Seamlessly detects single-track loops and repeated plays, logging each play as an independent scrobble.
-- **Full offline resilience:** If your connection drops or you are on a restricted network/VPN, scrobbles queue in local SQLite storage and flush automatically once reachability returns.
+- **Offline queue:** Eligible plays and their history entries are saved together in Room. WorkManager sends queued plays when connected and records Last.fm’s response for each entry.
 
 ---
 
 ## Features
 
-- **Material 3 Expressive UI:** Custom OLED Dark Purple palette (`#141218` background, `#D0BCFF` accents), fluid spring-physics transitions, and zero sluggish tween fades.
-- **Direct Last.fm History:** The history tab mirrors your actual Last.fm profile feed via `user.getRecentTracks` with instant image thumbnails and real-time scrobble status.
+- **Material 3 Expressive UI:** The album cover changes shape on pause, the listening threshold uses a wave indicator, and the selected tab expands. Light and dark themes use the app’s purple palette.
+- **Listening history:** Switch between recent tracks on Last.fm and plays recorded on this device. Local entries show whether a play was queued, accepted, skipped or rejected.
 - **High-Resolution Artwork:** Extracts album covers directly from active `MediaSession` instances with automatic fallback to Last.fm's CDN.
 - **Granular Player Control:** Automatically discovers active media players on your device (Spotify, Qobuz, YouTube Music, Apple Music, Symfonium, Poweramp, etc.) with per-app toggles and batch actions.
 - **Pixel-Ready Adaptive Icon:** Official vector adaptive launcher icon + monochrome themed icon support for Android 13+.
@@ -61,6 +61,8 @@ Get the signed release APK from GitHub Releases:
 ---
 
 ## Building from Source
+
+For a debug APK that installs alongside the release, run `./gradlew -PpreviewBuild=true assembleDebug`. Android lists it as **sScrobbler Preview**.
 
 1. Clone the repository:
    ```bash

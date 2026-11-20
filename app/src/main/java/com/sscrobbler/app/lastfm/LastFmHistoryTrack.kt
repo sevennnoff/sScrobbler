@@ -8,5 +8,6 @@ data class LastFmHistoryTrack(
     val timestamp: Long,
     val timeFormatted: String,
     val isNowPlaying: Boolean = false,
-    val artworkUrl: String? = null
+    val artworkUrl: String? = null,
+    val localStatus: com.sscrobbler.app.model.ScrobbleStatus? = null
 )

@@ -11,6 +11,7 @@ import com.sscrobbler.app.lastfm.LastFmClient
 import com.sscrobbler.app.model.Track
 import com.sscrobbler.app.scrobble.FinalizeReason
 import com.sscrobbler.app.scrobble.ScrobbleEngine
+import com.sscrobbler.app.settings.AppSettings
 import com.sscrobbler.app.settings.SettingsRepository
 import com.sscrobbler.app.util.Clock
 import com.sscrobbler.app.util.DebugLog
@@ -20,7 +21,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,6 +34,7 @@ import kotlinx.coroutines.sync.withLock
 
 interface MediaControllerAdapter {
     val packageName: String
+    val sessionId: Any get() = this
     val playbackState: PlaybackState?
     val metadata: MediaMetadata?
     fun registerCallback(callback: MediaController.Callback)
@@ -42,6 +45,7 @@ class SystemMediaControllerAdapter(
     private val controller: MediaController,
     private val handler: Handler = Handler(Looper.getMainLooper())
 ) : MediaControllerAdapter {
+    override val sessionId: Any get() = controller.sessionToken
     override val packageName: String
         get() = controller.packageName
 
@@ -77,62 +81,72 @@ class PlaybackTracker(
     private val clock: Clock = SystemClockImpl,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 ) {
-    inner class ControllerSession(
-        val controller: MediaControllerAdapter
-    ) : MediaController.Callback() {
-        var lastPlaybackState: PlaybackState? = null
-        var lastMetadata: MediaMetadata? = null
-        var lastKnownPositionMs: Long = 0L
-        var lastStateChangeElapsedMs: Long = clock.elapsedRealtime()
+    private inner class ControllerSession(val controller: MediaControllerAdapter) : MediaController.Callback() {
+        var state = controller.playbackState
+        var metadata = controller.metadata
+        var lastStateChangeElapsedMs = clock.elapsedRealtime()
+        var metadataStartElapsedMs: Long? = null
 
-        fun isPlaying(): Boolean {
-            val state = lastPlaybackState?.state ?: PlaybackState.STATE_NONE
-            return state == PlaybackState.STATE_PLAYING ||
-                    state == PlaybackState.STATE_FAST_FORWARDING ||
-                    state == PlaybackState.STATE_REWINDING
-        }
+        fun isPlaying(): Boolean = state?.state == PlaybackState.STATE_PLAYING
 
-        fun currentPosition(): Long {
-            val state = lastPlaybackState ?: return 0L
-            val rawPos = state.position
-            if (rawPos < 0) return 0L
-            val stateTime = state.lastPositionUpdateTime
-            if (state.state == PlaybackState.STATE_PLAYING && stateTime > 0) {
-                val now = clock.elapsedRealtime()
-                val speed = state.playbackSpeed
-                val diff = (now - stateTime) * (if (speed > 0) speed else 1.0f)
-                return (rawPos + diff).toLong()
-            }
-            return rawPos
+        fun position(): Long {
+            val now = clock.elapsedRealtime()
+            metadataStartElapsedMs?.let { return if (isPlaying()) (now - it).coerceAtLeast(0L) else 0L }
+            val playback = state ?: return 0L
+            if (playback.position < 0L) return 0L
+            val since = playback.lastPositionUpdateTime
+            val elapsed = if (isPlaying() && since > 0) (now - since).coerceAtLeast(0L) else 0L
+            return playback.position + (elapsed * playback.playbackSpeed.coerceAtLeast(0f)).toLong()
         }
 
         override fun onPlaybackStateChanged(state: PlaybackState?) {
-            lastPlaybackState = state
-            lastStateChangeElapsedMs = clock.elapsedRealtime()
-            handleStateChanged(this, state)
+            val liveMetadata = controller.metadata
+            post {
+                if (trackedSessions[controller.packageName] !== this) return@post
+                val wasPlaying = isPlaying()
+                this.state = state
+                metadataStartElapsedMs = null
+                if (wasPlaying != isPlaying()) lastStateChangeElapsedMs = clock.elapsedRealtime()
+                if (liveMetadata != null) metadata = liveMetadata
+                handleState(this, wasPlaying)
+            }
         }
 
         override fun onMetadataChanged(metadata: MediaMetadata?) {
-            lastMetadata = metadata
-            handleMetadataChanged(this, metadata)
+            post {
+                if (trackedSessions[controller.packageName] !== this) return@post
+                this.metadata = metadata
+                if (activeSessionKey == controller.packageName) updateMetadata(this)
+                else if (isPlaying()) arbitrate()
+            }
         }
 
         override fun onSessionDestroyed() {
-            handleSessionDestroyed(this)
+            post {
+                if (trackedSessions[controller.packageName] === this) {
+                    latestControllers = latestControllers.filterNot { it.sessionId == controller.sessionId }
+                    detach(this)
+                    arbitrate()
+                }
+            }
         }
     }
 
+    // Android callbacks, the ticker, and preference updates can arrive on different threads.
+    // Finish each transition before consuming the next callback, including across Room suspensions.
+    private val events = Channel<suspend () -> Unit>(Channel.UNLIMITED)
     private val trackedSessions = mutableMapOf<String, ControllerSession>()
+    private var latestControllers: List<MediaControllerAdapter> = emptyList()
+    private var settings = AppSettings()
     var activeSessionKey: String? = null
         private set
-
     private var activeTrack: Track? = null
-    private var lastObservedPositionMs: Long = 0L
-    private var lastNowPlayingTrack: Track? = null
-    private var lastNowPlayingSentElapsedMs: Long = 0L
+    private var lastPosition = 0L
+    private var lastRefreshMs: Long? = null
+    private var lastNowPlayingAttempt: Long? = null
+    private var lastNowPlayingSucceeded = false
     private var nowPlayingJob: Job? = null
     private val nowPlayingMutex = Mutex()
-
     private val _activeTrackFlow = MutableStateFlow<Track?>(null)
     val activeTrackFlow: StateFlow<Track?> = _activeTrackFlow.asStateFlow()
 
@@ -151,39 +165,50 @@ class PlaybackTracker(
     private val _discoveredPackagesFlow = MutableStateFlow<Set<String>>(emptySet())
     val discoveredPackagesFlow: StateFlow<Set<String>> = _discoveredPackagesFlow.asStateFlow()
 
+
+    private var pausedSince: Long? = null
     private var pauseTimeoutJob: Job? = null
     private var tickJob: Job? = null
-
-    private var settingsJob: kotlinx.coroutines.Job? = null
+    private val settingsJob: Job
 
     init {
-        startTicker()
-        settingsJob = scope.launch {
-            settingsRepository.settingsFlow.collect { settings ->
-                val activeKey = activeSessionKey
-                if (activeKey != null) {
-                    val isAllowed = settings.packageFilter[activeKey] ?: settings.defaultNewAppsAllowed
-                    if (!isAllowed) {
-                        scrobbleEngine.finalizeCurrentSession(FinalizeReason.SessionDestroyed)
-                        activeSessionKey = null
-                        activeTrack = null
-                        _activeTrackFlow.value = null
-                        _isPlayingFlow.value = false
-                        _positionFlow.value = 0L
-                        _artworkBitmapFlow.value = null
-                        _artworkUriFlow.value = null
-                        cancelPauseTimeout()
-                    }
+        scope.launch {
+            for (event in events) {
+                try {
+                    event()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    DebugLog.log("ERROR", "Playback update failed: ${e.message}")
                 }
             }
         }
+        settingsJob = scope.launch {
+            settingsRepository.settingsFlow.collect { updated ->
+                post {
+                    val filterChanged = settings.packageFilter != updated.packageFilter ||
+                        settings.defaultNewAppsAllowed != updated.defaultNewAppsAllowed
+                    val timeoutChanged = settings.pauseTimeoutMs != updated.pauseTimeoutMs
+                    settings = updated
+                    if (timeoutChanged && pausedSince != null) {
+                        trackedSessions[activeSessionKey]?.let { schedulePauseTimeout(it) }
+                    }
+                    if (filterChanged) reconcileControllers()
+                }
+            }
+        }
+        startTicker()
+    }
+
+    private fun post(event: suspend () -> Unit) {
+        events.trySend(event)
     }
 
     fun startTicker() {
         if (tickJob?.isActive == true) return
         tickJob = scope.launch {
             while (isActive) {
-                delay(1000L)
+                delay(1_000L)
                 onTick()
             }
         }
@@ -194,498 +219,295 @@ class PlaybackTracker(
         tickJob = null
     }
 
-    suspend fun onTick() {
-        if (activeSessionKey == null || trackedSessions[activeSessionKey] == null) {
-            MediaNotificationListener.instance?.refreshActiveSessions()
-            arbitrateActiveSession()
-        }
-        val activeKey = activeSessionKey ?: return
-        val session = trackedSessions[activeKey] ?: return
-
-        // Proactively check if player switched track without emitting onMetadataChanged
-        val liveMeta = session.controller.metadata
-        val liveTrack = extractTrack(liveMeta, activeKey)
-        if (liveTrack != null && !isSameTrack(liveTrack, activeTrack)) {
-            handleMetadataChanged(session, liveMeta)
-            return
-        }
-
-        scrobbleEngine.onTimeTick()
-
-        if (session.isPlaying()) {
-            val pos = session.currentPosition()
-            val duration = activeTrack?.durationMs ?: 0L
-            if (duration > 0 && lastObservedPositionMs > (duration * 0.70) && pos < 5000L) {
-                lastNowPlayingTrack = null
-                lastNowPlayingSentElapsedMs = 0L
-            }
-            session.lastKnownPositionMs = pos
-            lastObservedPositionMs = pos
-            _positionFlow.value = pos
-            _isPlayingFlow.value = true
-            scrobbleEngine.onPositionChanged(pos)
-
-            // Periodically refresh Now Playing for long tracks (Last.fm server TTL is ~3-4 minutes)
-            val current = activeTrack
-            if (current != null) {
-                val now = clock.elapsedRealtime()
-                if (now - lastNowPlayingSentElapsedMs >= 150_000L) {
-                    triggerNowPlaying(current, force = true)
-                }
-            }
-        } else {
-            val pos = session.currentPosition()
-            _positionFlow.value = pos
-            _isPlayingFlow.value = false
-            val duration = activeTrack?.durationMs ?: 0L
-            if (duration > 0 && pos >= (duration - 3000L)) {
-                scrobbleEngine.finalizeCurrentSession(FinalizeReason.NaturalEnd)
-                activeSessionKey = null
-                activeTrack = null
-                lastNowPlayingTrack = null
-                lastNowPlayingSentElapsedMs = 0L
-                nowPlayingJob?.cancel()
-                _activeTrackFlow.value = null
-                _isPlayingFlow.value = false
-                _positionFlow.value = 0L
-                _artworkBitmapFlow.value = null
-                _artworkUriFlow.value = null
-                cancelPauseTimeout()
-            }
-        }
-    }
-
     fun onActiveSessionsChanged(controllers: List<MediaControllerAdapter>) {
-        _discoveredPackagesFlow.value = _discoveredPackagesFlow.value + controllers.map { it.packageName }.toSet()
-        scope.launch {
-            val settings = settingsRepository.getSettings()
-            val allowedControllers = controllers.filter { controller ->
-                settings.packageFilter[controller.packageName] ?: settings.defaultNewAppsAllowed
-            }
-
-            val newKeys = allowedControllers.map { it.packageName }.toSet()
-
-            val iterator = trackedSessions.iterator()
-            while (iterator.hasNext()) {
-                val entry = iterator.next()
-                if (entry.key !in newKeys) {
-                    entry.value.controller.unregisterCallback(entry.value)
-                    if (entry.key == activeSessionKey) {
-                        scrobbleEngine.finalizeCurrentSession(FinalizeReason.SessionDestroyed)
-                        activeSessionKey = null
-                        activeTrack = null
-                        lastNowPlayingTrack = null
-                        lastNowPlayingSentElapsedMs = 0L
-                        nowPlayingJob?.cancel()
-                        _activeTrackFlow.value = null
-                        _isPlayingFlow.value = false
-                        _positionFlow.value = 0L
-                        _artworkBitmapFlow.value = null
-                        _artworkUriFlow.value = null
-                        cancelPauseTimeout()
-                    }
-                    iterator.remove()
-                }
-            }
-
-            for (controller in allowedControllers) {
-                val pkg = controller.packageName
-                if (!trackedSessions.containsKey(pkg)) {
-                    val session = ControllerSession(controller)
-                    session.lastPlaybackState = controller.playbackState
-                    session.lastMetadata = controller.metadata
-                    controller.registerCallback(session)
-                    trackedSessions[pkg] = session
-                }
-            }
-
-            arbitrateActiveSession()
+        post {
+            latestControllers = controllers
+            settings = settingsRepository.getSettings()
+            reconcileControllers()
         }
     }
 
     fun registerController(controller: MediaControllerAdapter) {
-        val pkg = controller.packageName
-        _discoveredPackagesFlow.value = _discoveredPackagesFlow.value + pkg
-        if (trackedSessions.containsKey(pkg)) return
-
-        val session = ControllerSession(controller)
-        session.lastPlaybackState = controller.playbackState
-        session.lastMetadata = controller.metadata
-        controller.registerCallback(session)
-        trackedSessions[pkg] = session
-
-        scope.launch {
-            arbitrateActiveSession()
+        post {
+            latestControllers = latestControllers.filterNot { it.sessionId == controller.sessionId } + controller
+            settings = settingsRepository.getSettings()
+            reconcileControllers()
         }
     }
 
     fun unregisterController(pkg: String) {
-        val session = trackedSessions.remove(pkg) ?: return
-        session.controller.unregisterCallback(session)
-        if (pkg == activeSessionKey) {
-            scope.launch {
-                scrobbleEngine.finalizeCurrentSession(FinalizeReason.SessionDestroyed)
-                activeSessionKey = null
-                activeTrack = null
-                lastNowPlayingTrack = null
-                lastNowPlayingSentElapsedMs = 0L
-                nowPlayingJob?.cancel()
-                _activeTrackFlow.value = null
-                _isPlayingFlow.value = false
-                _positionFlow.value = 0L
-                _artworkBitmapFlow.value = null
-                _artworkUriFlow.value = null
-                cancelPauseTimeout()
-                arbitrateActiveSession()
-            }
+        post {
+            latestControllers = latestControllers.filterNot { it.packageName == pkg }
+            trackedSessions[pkg]?.let { detach(it) }
+            arbitrate()
         }
     }
 
-    private fun handleStateChanged(session: ControllerSession, state: PlaybackState?) {
-        scope.launch {
-            val pkg = session.controller.packageName
-            val isPlaying = session.isPlaying()
-            val stateCode = state?.state ?: PlaybackState.STATE_NONE
-            val isStopped = stateCode == PlaybackState.STATE_STOPPED || stateCode == PlaybackState.STATE_NONE
-            DebugLog.log(
-                "TRACK",
-                "state=$stateCode playing=$isPlaying pkg=${pkg.substringAfterLast('.')} pos=${session.currentPosition() / 1000}s track=${activeTrack?.title ?: "none"}"
-            )
-
-            if (isPlaying && activeSessionKey != pkg) {
-                switchActiveSession(pkg)
-                return@launch
+    private suspend fun reconcileControllers() {
+        _discoveredPackagesFlow.value += latestControllers.map { it.packageName }
+        val candidates = latestControllers
+            .filter { settings.packageFilter[it.packageName] ?: settings.defaultNewAppsAllowed }
+            .groupBy { it.packageName }
+            .mapValues { (pkg, group) ->
+                val playing = group.filter { it.playbackState?.state == PlaybackState.STATE_PLAYING }
+                val preferred = playing.ifEmpty { group }
+                preferred.firstOrNull { it.sessionId == trackedSessions[pkg]?.controller?.sessionId } ?: preferred.first()
             }
-
-            if (activeSessionKey == pkg) {
-                if (isStopped) {
-                    scrobbleEngine.onPlaybackStopped()
-                    activeSessionKey = null
-                    activeTrack = null
-                    lastNowPlayingTrack = null
-                    lastNowPlayingSentElapsedMs = 0L
-                    nowPlayingJob?.cancel()
-                    _activeTrackFlow.value = null
-                    _isPlayingFlow.value = false
-                    _positionFlow.value = 0L
-                    _artworkBitmapFlow.value = null
-                    _artworkUriFlow.value = null
-                    cancelPauseTimeout()
-                    return@launch
-                }
-
-                // If controller metadata is ahead of activeTrack, route to metadata changed first
-                val liveMeta = session.controller.metadata ?: session.lastMetadata
-                val liveTrack = extractTrack(liveMeta, pkg)
-                if (liveTrack != null && !isSameTrack(liveTrack, activeTrack)) {
-                    handleMetadataChanged(session, liveMeta)
-                    return@launch
-                }
-
-                val currentTrack = activeTrack
-                val pos = session.currentPosition()
-                val duration = currentTrack?.durationMs ?: 0L
-
-                _isPlayingFlow.value = isPlaying
-                _positionFlow.value = pos
-
-                // Repeat detection on state change:
-                // old position > 70% and new position < 5s while playing
-                if (duration > 0 && lastObservedPositionMs > (duration * 0.70) && pos < 5000L && isPlaying) {
-                    scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackRepeated)
-                    currentTrack?.let {
-                        lastNowPlayingTrack = null
-                        lastNowPlayingSentElapsedMs = 0L
-                        scrobbleEngine.onTrackStarted(it)
-                        triggerNowPlaying(it, force = true)
-                    }
-                    lastObservedPositionMs = pos
-                    session.lastKnownPositionMs = pos
-                    return@launch
-                }
-
-                // Check natural end
-                if (duration > 0 && pos >= (duration - 3000L) && !isPlaying) {
-                    scrobbleEngine.finalizeCurrentSession(FinalizeReason.NaturalEnd)
-                    activeSessionKey = null
-                    activeTrack = null
-                    lastNowPlayingTrack = null
-                    lastNowPlayingSentElapsedMs = 0L
-                    nowPlayingJob?.cancel()
-                    _activeTrackFlow.value = null
-                    _isPlayingFlow.value = false
-                    _positionFlow.value = 0L
-                    _artworkBitmapFlow.value = null
-                    _artworkUriFlow.value = null
-                    cancelPauseTimeout()
-                    return@launch
-                }
-
-                scrobbleEngine.onPlaybackStateChanged(isPlaying)
-
-                if (isPlaying) {
-                    cancelPauseTimeout()
-                    if (currentTrack != null) {
-                        triggerNowPlaying(currentTrack, force = true)
-                    }
-                } else {
-                    schedulePauseTimeout()
-                    nowPlayingJob?.cancel()
-                }
-
-                lastObservedPositionMs = pos
-                session.lastKnownPositionMs = pos
-            } else {
-                arbitrateActiveSession()
+        for ((pkg, session) in trackedSessions.toMap()) {
+            if (candidates[pkg]?.sessionId != session.controller.sessionId) detach(session)
+        }
+        for ((pkg, controller) in candidates) {
+            if (pkg !in trackedSessions) {
+                val session = ControllerSession(controller)
+                trackedSessions[pkg] = session
+                controller.registerCallback(session)
             }
         }
+        arbitrate()
     }
 
-    private fun handleMetadataChanged(session: ControllerSession, metadata: MediaMetadata?) {
-        scope.launch {
-            val pkg = session.controller.packageName
-            val newTrack = extractTrack(metadata, pkg)
-            DebugLog.log(
-                "TRACK",
-                "metadata pkg=${pkg.substringAfterLast('.')} -> ${newTrack?.artist ?: "?"} - ${newTrack?.title ?: "?"}" +
-                    (newTrack?.durationMs?.let { " (${it / 1000}s)" } ?: " (no duration)")
-            )
-
-            if (activeSessionKey == pkg) {
-                if (newTrack != null && !isSameTrack(newTrack, activeTrack)) {
-                    nowPlayingJob?.cancel()
-                    lastNowPlayingTrack = null
-                    lastNowPlayingSentElapsedMs = 0L
-                    val newBitmap = extractArtwork(metadata)
-                    val newUri = extractArtworkUri(metadata)
-                    activeTrack = newTrack
-                    _activeTrackFlow.value = newTrack
-                    _artworkBitmapFlow.value = newBitmap
-                    _artworkUriFlow.value = newUri
-                    lastObservedPositionMs = 0L
-                    session.lastKnownPositionMs = 0L
-                    _positionFlow.value = 0L
-                    cancelPauseTimeout()
-                    scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackChanged)
-                    scrobbleEngine.onTrackStarted(newTrack)
-                    if (session.isPlaying()) {
-                        _isPlayingFlow.value = true
-                        scrobbleEngine.onPlaybackStateChanged(true)
-                        triggerNowPlaying(newTrack, force = true)
-                    }
-                } else if (newTrack != null && isSameTrack(newTrack, activeTrack)) {
-                    val newBitmap = extractArtwork(metadata)
-                    if (newBitmap != null) {
-                        _artworkBitmapFlow.value = newBitmap
-                    }
-                    val newUri = extractArtworkUri(metadata)
-                    if (!newUri.isNullOrBlank()) {
-                        _artworkUriFlow.value = newUri
-                    }
-                    if (newTrack.durationMs != null && activeTrack?.durationMs == null) {
-                        activeTrack = activeTrack?.copy(durationMs = newTrack.durationMs)
-                        _activeTrackFlow.value = activeTrack
-                    }
-                    if (newTrack.album != null && activeTrack?.album == null) {
-                        activeTrack = activeTrack?.copy(album = newTrack.album)
-                        _activeTrackFlow.value = activeTrack
-                    }
-                    val pos = session.currentPosition()
-                    val duration = newTrack.durationMs ?: activeTrack?.durationMs ?: 0L
-                    if (duration > 0 && lastObservedPositionMs > (duration * 0.70) && pos < 5000L) {
-                        scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackRepeated)
-                        lastNowPlayingTrack = null
-                        lastNowPlayingSentElapsedMs = 0L
-                        scrobbleEngine.onTrackStarted(newTrack)
-                        triggerNowPlaying(newTrack, force = true)
-                        lastObservedPositionMs = pos
-                        session.lastKnownPositionMs = pos
-                        _positionFlow.value = pos
-                    }
-                }
-            } else if (session.isPlaying()) {
-                switchActiveSession(pkg)
-            }
-        }
-    }
-
-    private fun handleSessionDestroyed(session: ControllerSession) {
+    private suspend fun detach(session: ControllerSession) {
         val pkg = session.controller.packageName
-        unregisterController(pkg)
+        trackedSessions.remove(pkg)
+        session.controller.unregisterCallback(session)
+        if (activeSessionKey == pkg) finishActive(FinalizeReason.SessionDestroyed)
     }
 
-    private suspend fun arbitrateActiveSession() {
-        val playingSessions = trackedSessions.values.filter { it.isPlaying() }
-        val candidate = if (playingSessions.isNotEmpty()) {
-            playingSessions.maxByOrNull { it.lastStateChangeElapsedMs }
-        } else {
-            activeSessionKey?.let { trackedSessions[it] }
-        }
-
-        val targetKey = candidate?.controller?.packageName
-        if (targetKey != null && targetKey != activeSessionKey) {
-            switchActiveSession(targetKey)
-        }
+    private suspend fun arbitrate() {
+        val candidate = trackedSessions.values.filter { it.isPlaying() }.maxByOrNull { it.lastStateChangeElapsedMs }
+        if (candidate != null && candidate.controller.packageName != activeSessionKey) activate(candidate)
     }
 
-    private suspend fun switchActiveSession(newKey: String) {
-        val newSession = trackedSessions[newKey] ?: return
-        DebugLog.log("TRACK", "active session -> ${newKey.substringAfterLast('.')}")
-
-        if (activeSessionKey != null && activeSessionKey != newKey) {
-            scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackChanged)
-            cancelPauseTimeout()
-        }
-
-        activeSessionKey = newKey
-        val meta = newSession.controller.metadata ?: newSession.lastMetadata
-        newSession.lastMetadata = meta
-        val track = extractTrack(meta, newKey)
-        nowPlayingJob?.cancel()
-        lastNowPlayingTrack = null
-        lastNowPlayingSentElapsedMs = 0L
-        activeTrack = track
-        _activeTrackFlow.value = track
-        _artworkBitmapFlow.value = extractArtwork(meta)
-        _artworkUriFlow.value = extractArtworkUri(meta)
-
-        if (track != null) {
-            scrobbleEngine.onTrackStarted(track)
-            val isPlaying = newSession.isPlaying()
-            _isPlayingFlow.value = isPlaying
-            scrobbleEngine.onPlaybackStateChanged(isPlaying)
-            if (isPlaying) {
-                cancelPauseTimeout()
-                triggerNowPlaying(track, force = true)
-            } else {
-                schedulePauseTimeout()
-            }
-            lastObservedPositionMs = newSession.currentPosition()
-            newSession.lastKnownPositionMs = lastObservedPositionMs
-            _positionFlow.value = lastObservedPositionMs
-        } else {
-            _isPlayingFlow.value = false
-            _positionFlow.value = 0L
-        }
+    private suspend fun activate(session: ControllerSession) {
+        if (activeSessionKey != null) finishActive(FinalizeReason.TrackChanged)
+        activeSessionKey = session.controller.packageName
+        DebugLog.log("TRACK", "Active source: ${session.controller.packageName}")
+        updateMetadata(session, pairedState = true)
     }
 
-    private fun schedulePauseTimeout() {
-        cancelPauseTimeout()
-        pauseTimeoutJob = scope.launch {
-            val settings = settingsRepository.getSettings()
-            val timeoutMs = settings.pauseTimeoutMs
-            if (timeoutMs > 0L) {
-                delay(timeoutMs)
-                scrobbleEngine.finalizeCurrentSession(FinalizeReason.PauseTimeout)
-                activeSessionKey = null
-                activeTrack = null
-                lastNowPlayingTrack = null
-                lastNowPlayingSentElapsedMs = 0L
-                nowPlayingJob?.cancel()
-                _activeTrackFlow.value = null
-                _isPlayingFlow.value = false
-                _positionFlow.value = 0L
-                _artworkBitmapFlow.value = null
-                _artworkUriFlow.value = null
+    private suspend fun updateMetadata(session: ControllerSession, pairedState: Boolean = false): Boolean {
+        val metadata = session.metadata ?: return false
+        val next = extractTrack(metadata, session.controller.packageName) ?: return false
+        val previous = activeTrack
+        val changed = !isSameTrack(previous, next)
+        val bitmap = extractArtwork(metadata)
+        val uri = extractArtworkUri(metadata)
+        if (changed || bitmap != null) _artworkBitmapFlow.value = bitmap
+        if (changed || uri != null) _artworkUriFlow.value = uri
+        if (changed) {
+            resetTimers()
+            if (previous != null) scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackChanged)
+            if (previous != null && !pairedState) session.metadataStartElapsedMs = clock.elapsedRealtime()
+            activeTrack = next
+            _activeTrackFlow.value = next
+            lastPosition = session.position()
+            _positionFlow.value = lastPosition
+            scrobbleEngine.onTrackStarted(next)
+            scrobbleEngine.updateArtworkUri(uri)
+            applyPlayback(session)
+        } else if (previous != null) {
+            scrobbleEngine.updateArtworkUri(uri)
+            val enriched = next.copy(
+                durationMs = next.durationMs ?: previous.durationMs,
+                album = next.album ?: previous.album,
+                albumArtist = next.albumArtist ?: previous.albumArtist
+            )
+            if (previous != enriched) {
+                activeTrack = enriched
+                _activeTrackFlow.value = enriched
+                scrobbleEngine.updateTrackMetadata(enriched)
             }
         }
+        return changed
     }
 
-    private fun cancelPauseTimeout() {
+    private suspend fun handleState(session: ControllerSession, wasPlaying: Boolean) {
+        val pkg = session.controller.packageName
+        if (pkg != activeSessionKey) {
+            if (session.isPlaying()) activate(session)
+            return
+        }
+        when (session.state?.state) {
+            PlaybackState.STATE_STOPPED, PlaybackState.STATE_NONE -> {
+                scrobbleEngine.onPlaybackStopped()
+                clearActive()
+                arbitrate()
+                return
+            }
+        }
+        if (updateMetadata(session, pairedState = true)) return
+        if (activeTrack == null) return
+        if (observePosition(session)) return
+        if (session.isPlaying() != wasPlaying) applyPlayback(session)
+        if (!session.isPlaying()) arbitrate()
+    }
+
+    private suspend fun applyPlayback(session: ControllerSession) {
+        val playing = session.isPlaying()
+        _isPlayingFlow.value = playing
+        scrobbleEngine.onPlaybackStateChanged(playing)
         pauseTimeoutJob?.cancel()
-        pauseTimeoutJob = null
+        if (playing) {
+            pausedSince = null
+            activeTrack?.let { sendNowPlaying(it, force = true) }
+        } else {
+            nowPlayingJob?.cancel()
+            pausedSince = clock.elapsedRealtime()
+            schedulePauseTimeout(session)
+        }
     }
 
-    private fun isSameTrack(t1: Track?, t2: Track?): Boolean {
-        if (t1 == null && t2 == null) return true
-        if (t1 == null || t2 == null) return false
-        return t1.artist.trim().equals(t2.artist.trim(), ignoreCase = true) &&
-                t1.title.trim().equals(t2.title.trim(), ignoreCase = true)
+    private fun schedulePauseTimeout(session: ControllerSession) {
+        pauseTimeoutJob?.cancel()
+        val timeout = settings.pauseTimeoutMs
+        val since = pausedSince ?: return
+        val track = activeTrack
+        if (timeout <= 0L) return
+        pauseTimeoutJob = scope.launch {
+            delay((timeout - (clock.elapsedRealtime() - since)).coerceAtLeast(0L))
+            post {
+                if (trackedSessions[activeSessionKey] === session && isSameTrack(activeTrack, track) && pausedSince == since && !session.isPlaying()) {
+                    finishActive(FinalizeReason.PauseTimeout)
+                    arbitrate()
+                }
+            }
+        }
     }
 
-    private fun triggerNowPlaying(track: Track, force: Boolean = false) {
-        val active = activeTrack ?: return
-        if (!isSameTrack(track, active)) return
-
-        val now = clock.elapsedRealtime()
-        val isDifferentTrack = !isSameTrack(lastNowPlayingTrack, track)
-
-        // Throttle rapid duplicate calls for the same track
-        if (!isDifferentTrack && !force && (now - lastNowPlayingSentElapsedMs < 30_000L)) {
-            return
+    private suspend fun observePosition(session: ControllerSession): Boolean {
+        val track = activeTrack ?: return false
+        val duration = track.durationMs
+        val pos = session.position()
+        val transition = ScrobbleEngine.positionTransition(lastPosition, pos, duration, session.isPlaying())
+        lastPosition = pos
+        _positionFlow.value = pos
+        if (transition == FinalizeReason.TrackRepeated) {
+            scrobbleEngine.finalizeCurrentSession(FinalizeReason.TrackRepeated)
+            resetTimers()
+            scrobbleEngine.onTrackStarted(track)
+            scrobbleEngine.updateArtworkUri(_artworkUriFlow.value)
+            applyPlayback(session)
+            return true
         }
-
-        // Even with force (resume from pause / periodic tick), avoid spamming if sent in the last 10 seconds
-        if (!isDifferentTrack && (now - lastNowPlayingSentElapsedMs < 10_000L)) {
-            return
+        if (transition == FinalizeReason.NaturalEnd) {
+            finishActive(FinalizeReason.NaturalEnd)
+            arbitrate()
+            return true
         }
+        return false
+    }
 
+    fun onTick() {
+        post {
+            if (activeSessionKey == null) {
+                val now = clock.elapsedRealtime()
+                val previous = lastRefreshMs
+                if (previous == null || now - previous >= 15_000L) {
+                    lastRefreshMs = now
+                    MediaNotificationListener.instance?.refreshActiveSessions()
+                }
+                arbitrate()
+            }
+            val session = trackedSessions[activeSessionKey] ?: return@post
+            val liveState = session.controller.playbackState
+            val previousState = session.state
+            if (liveState != null && (liveState.state != previousState?.state ||
+                    liveState.lastPositionUpdateTime > (previousState?.lastPositionUpdateTime ?: 0L))) {
+                val wasPlaying = session.isPlaying()
+                session.state = liveState
+                session.metadataStartElapsedMs = null
+                session.controller.metadata?.let { session.metadata = it }
+                handleState(session, wasPlaying)
+                if (activeSessionKey != session.controller.packageName) return@post
+            }
+            val live = session.controller.metadata
+            if (live != null && !isSameTrack(extractTrack(live, session.controller.packageName), activeTrack)) {
+                session.metadata = live
+                if (updateMetadata(session)) return@post
+            }
+            if (activeTrack == null || observePosition(session)) return@post
+            scrobbleEngine.onTimeTick()
+            if (session.isPlaying()) activeTrack?.let { sendNowPlaying(it) }
+        }
+    }
+
+    private suspend fun finishActive(reason: FinalizeReason) {
+        scrobbleEngine.finalizeCurrentSession(reason)
+        clearActive()
+    }
+
+    private fun resetTimers() {
+        pausedSince = null
+        pauseTimeoutJob?.cancel()
         nowPlayingJob?.cancel()
-        nowPlayingJob = scope.launch {
-            val settings = settingsRepository.getSettings()
-            if (!settings.sendNowPlaying) return@launch
-            val current = activeTrack ?: return@launch
-            if (!isSameTrack(track, current)) return@launch
+        lastNowPlayingAttempt = null
+        lastNowPlayingSucceeded = false
+    }
 
-            val sessionKey = authRepository.getSessionKey()
-            if (!sessionKey.isNullOrBlank() && networkDetector.isOnline()) {
-                val durationSec = track.durationMs?.let { (it / 1000).toInt() }
-                DebugLog.log(
-                    "NP",
-                    "SEND ${track.artist} - ${track.title}" + if (force) " (forced)" else ""
-                )
-                val result = nowPlayingMutex.withLock {
-                    lastFmClient.updateNowPlaying(
-                        artist = track.artist,
-                        track = track.title,
-                        album = track.album,
-                        albumArtist = track.albumArtist,
-                        durationSeconds = durationSec,
-                        sessionKey = sessionKey
-                    )
+    private fun clearActive() {
+        resetTimers()
+        activeSessionKey = null
+        activeTrack = null
+        lastPosition = 0L
+        _activeTrackFlow.value = null
+        _isPlayingFlow.value = false
+        _positionFlow.value = 0L
+        _artworkBitmapFlow.value = null
+        _artworkUriFlow.value = null
+    }
+
+    private fun isSameTrack(first: Track?, second: Track?): Boolean =
+        first != null && second != null &&
+            first.artist.equals(second.artist, ignoreCase = true) && first.title.equals(second.title, ignoreCase = true)
+
+    private fun sendNowPlaying(track: Track, force: Boolean = false) {
+        if (!settings.sendNowPlaying || nowPlayingJob?.isActive == true) return
+        val now = clock.elapsedRealtime()
+        val interval = when {
+            force -> 10_000L
+            lastNowPlayingSucceeded -> 150_000L
+            else -> 30_000L
+        }
+        if (lastNowPlayingAttempt?.let { now - it < interval } == true) return
+        lastNowPlayingAttempt = now
+        lastNowPlayingSucceeded = false
+        nowPlayingJob = scope.launch {
+            val key = authRepository.getSessionKey()
+            if (key.isNullOrBlank() || !networkDetector.isOnline()) return@launch
+            val result = nowPlayingMutex.withLock {
+                lastFmClient.updateNowPlaying(track.artist, track.title, track.album, track.albumArtist,
+                    track.durationMs?.let { (it / 1_000).toInt() }, key)
+            }
+            post {
+                if (lastNowPlayingAttempt == now && isSameTrack(track, activeTrack)) {
+                    lastNowPlayingSucceeded = result is com.sscrobbler.app.lastfm.LastFmResult.Success
                 }
-                if (result is com.sscrobbler.app.lastfm.LastFmResult.Success) {
-                    val afterCall = activeTrack
-                    if (afterCall != null && isSameTrack(afterCall, track)) {
-                        lastNowPlayingTrack = track
-                        lastNowPlayingSentElapsedMs = clock.elapsedRealtime()
-                    }
-                }
-            } else {
-                DebugLog.log(
-                    "NP",
-                    "SKIP ${track.artist} - ${track.title}: " +
-                        if (sessionKey.isNullOrBlank()) "no session key" else "offline"
-                )
             }
         }
     }
 
     fun extractTrack(metadata: MediaMetadata?, sourcePackage: String): Track? {
         if (metadata == null) return null
-        var artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
-            ?: metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
-            ?: metadata.getString(MediaMetadata.METADATA_KEY_AUTHOR)
-            ?: metadata.getString(MediaMetadata.METADATA_KEY_COMPOSER)
-            ?: metadata.description?.subtitle?.toString()
-
-        var title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
-            ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
-            ?: metadata.description?.title?.toString()
-
-        if (artist.isNullOrBlank() && !title.isNullOrBlank() && title.contains(" - ")) {
-            val parts = title.split(" - ", limit = 2)
-            artist = parts[0].trim()
-            title = parts[1].trim()
+        fun firstText(vararg keys: String): String? = keys.firstNotNullOfOrNull { key ->
+            metadata.getString(key)?.trim()?.takeIf { it.isNotEmpty() }
         }
+        var artist = firstText(MediaMetadata.METADATA_KEY_ARTIST, MediaMetadata.METADATA_KEY_ALBUM_ARTIST,
+            MediaMetadata.METADATA_KEY_AUTHOR, MediaMetadata.METADATA_KEY_COMPOSER)
+            ?: metadata.description?.subtitle?.toString()?.trim()
+        var title = firstText(MediaMetadata.METADATA_KEY_TITLE, MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
+            ?: metadata.description?.title?.toString()?.trim()
 
-        if (artist.isNullOrBlank() || title.isNullOrBlank()) {
-            return null
+        if (artist.isNullOrBlank() && !title.isNullOrBlank()) {
+            val parts = title.split(Regex(" +[-–—] +"), limit = 2)
+            if (parts.size == 2) {
+                artist = parts[0].trim()
+                title = parts[1].trim()
+            }
         }
+        if (artist.isNullOrBlank() || title.isNullOrBlank()) return null
 
-        val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM)
-            ?: metadata.description?.description?.toString()
-        val albumArtist = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
+        val album = firstText(MediaMetadata.METADATA_KEY_ALBUM) ?: metadata.description?.description?.toString()?.trim()
+        val albumArtist = firstText(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
         val durationMs = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION).let {
             if (it > 0) it else null
         }
@@ -714,9 +536,10 @@ class PlaybackTracker(
     fun extractArtworkUri(metadata: MediaMetadata?): String? {
         if (metadata == null) return null
         return try {
-            metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
-                ?: metadata.getString(MediaMetadata.METADATA_KEY_ART_URI)
-                ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI)
+            listOf(MediaMetadata.METADATA_KEY_ALBUM_ART_URI, MediaMetadata.METADATA_KEY_ART_URI,
+                MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI).firstNotNullOfOrNull { key ->
+                metadata.getString(key)?.trim()?.takeIf { it.isNotEmpty() }
+            }
                 ?: metadata.description?.iconUri?.toString()
         } catch (e: Throwable) {
             null
@@ -725,14 +548,12 @@ class PlaybackTracker(
 
     fun destroy() {
         stopTicker()
-        settingsJob?.cancel()
-        settingsJob = null
-        cancelPauseTimeout()
-        nowPlayingJob?.cancel()
-        nowPlayingJob = null
-        lastNowPlayingTrack = null
-        lastNowPlayingSentElapsedMs = 0L
-        trackedSessions.values.forEach { it.controller.unregisterCallback(it) }
-        trackedSessions.clear()
+        settingsJob.cancel()
+        post {
+            trackedSessions.values.forEach { it.controller.unregisterCallback(it) }
+            trackedSessions.clear()
+            clearActive()
+        }
+        events.close()
     }
 }

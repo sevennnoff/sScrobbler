@@ -47,8 +47,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,11 +75,13 @@ fun OnboardingScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
 
-    LaunchedEffect(Unit) {
-        viewModel.checkNotificationAccess(context)
+    LifecycleResumeEffect(viewModel) {
+        viewModel.checkAllPermissions(context)
+        onPauseOrDispose { }
     }
+    BackHandler(enabled = state.currentStep > 0) { viewModel.prevStep() }
 
     Column(
         modifier = modifier
@@ -150,6 +155,7 @@ fun OnboardingScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun StepIndicators(currentStep: Int, totalSteps: Int) {
     Row(
@@ -158,10 +164,12 @@ fun StepIndicators(currentStep: Int, totalSteps: Int) {
     ) {
         for (i in 0 until totalSteps) {
             val isActive = i == currentStep
+            val width by animateDpAsState(if (isActive) 36.dp else 10.dp,
+                MaterialTheme.motionScheme.defaultSpatialSpec(), label = "step width")
             Box(
                 modifier = Modifier
                     .size(
-                        width = if (isActive) 28.dp else 10.dp,
+                        width = width,
                         height = 10.dp
                     )
                     .background(
@@ -215,7 +223,7 @@ fun OnboardingStep1Value(onNext: () -> Unit) {
             )
 
             Text(
-                text = "\"Scrobble when you're actually done listening. No premature 50% scrobbles.\"",
+                text = "Keep a listening history on Last.fm.",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.primary,
@@ -226,23 +234,23 @@ fun OnboardingStep1Value(onNext: () -> Unit) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = CardShape,
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
             ) {
                 Column(
                     modifier = Modifier.padding(18.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     ValuePropRow(
-                        title = "Real Listening Verification",
-                        desc = "Only scrobbles when a track completes naturally or switches — never on pause-and-abandon."
+                        title = "Listening time",
+                        desc = "Time spent paused or seeking doesn’t count toward your threshold."
                     )
                     ValuePropRow(
-                        title = "Universal Media Player Support",
-                        desc = "Works seamlessly with Spotify, Qobuz, Apple Music, YouTube Music, Symfonium, Poweramp and more."
+                        title = "Your music players",
+                        desc = "Choose which Android players can add tracks to your history."
                     )
                     ValuePropRow(
-                        title = "Offline Resilient & Deduplicated",
-                        desc = "Queues tracks safely in Room DB with SHA-256 deduplication and batches up to 50 tracks on reconnect."
+                        title = "Offline listening",
+                        desc = "Plays stay on your device until Last.fm can receive them."
                     )
                 }
             }
@@ -313,10 +321,6 @@ fun OnboardingStep2Permissions(
     onNext: () -> Unit,
     onBack: () -> Unit
 ) {
-    androidx.compose.runtime.LaunchedEffect(Unit) {
-        onCheck()
-    }
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -364,7 +368,7 @@ fun OnboardingStep2Permissions(
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = CardShape,
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
             ) {
                 Column(
                     modifier = Modifier
@@ -418,7 +422,7 @@ fun OnboardingStep2Permissions(
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = CardShape,
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
             ) {
                 Column(
                     modifier = Modifier

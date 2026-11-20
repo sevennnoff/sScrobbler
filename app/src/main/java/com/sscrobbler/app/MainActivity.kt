@@ -47,7 +47,8 @@ class MainActivity : ComponentActivity() {
         SettingsViewModel.Factory(
             settingsRepository = app.settingsRepository,
             authRepository = app.authRepository,
-            playbackTracker = app.playbackTracker
+            playbackTracker = app.playbackTracker,
+            lastFmClient = app.lastFmClient
         )
     }
 
@@ -64,7 +65,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         handleAuthIntent(intent)
         ScrobblerForegroundService.start(this)
-        MediaNotificationListener.ensureRebound(this)
 
         setContent {
             SScrobblerTheme {
@@ -86,7 +86,7 @@ class MainActivity : ComponentActivity() {
                     Surface(modifier = Modifier.fillMaxSize()) {
                         MainNavigation(
                             nowPlayingViewModel = nowPlayingViewModel,
-                            historyViewModel = historyViewModel,
+                            historyViewModel = { historyViewModel },
                             settingsViewModel = settingsViewModel,
                             onboardingViewModel = onboardingViewModel,
                             initialDestination = startDest
@@ -110,9 +110,11 @@ class MainActivity : ComponentActivity() {
     private fun handleAuthIntent(intent: Intent?) {
         val data = intent?.data ?: return
         if (data.scheme == "sscrobbler" && data.host == "auth") {
-            val token = data.getQueryParameter("token")
-            onboardingViewModel.confirmBrowserAuth(token)
-            settingsViewModel.confirmBrowserAuth(token)
+            val token = data.getQueryParameter("token")?.takeIf { it.isNotBlank() } ?: return
+            when {
+                onboardingViewModel.ownsBrowserToken(token) -> onboardingViewModel.confirmBrowserAuth(token)
+                settingsViewModel.ownsBrowserToken(token) -> settingsViewModel.confirmBrowserAuth(token)
+            }
         }
     }
 }

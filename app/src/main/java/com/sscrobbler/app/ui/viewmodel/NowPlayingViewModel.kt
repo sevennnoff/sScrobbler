@@ -15,14 +15,15 @@ import com.sscrobbler.app.settings.AppSettings
 import com.sscrobbler.app.settings.SettingsRepository
 import com.sscrobbler.app.util.Clock
 import com.sscrobbler.app.util.SystemClockImpl
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 
 data class NowPlayingUiState(
     val track: Track? = null,
@@ -33,6 +34,7 @@ data class NowPlayingUiState(
     val durationMs: Long? = null,
     val thresholdMs: Long = 120_000L,
     val minListenedPercent: Int = 50,
+    val tooShort: Boolean = false,
     val thresholdProgress: Float = 0f,
     val trackProgress: Float = 0f,
     val artwork: Bitmap? = null,
@@ -73,9 +75,35 @@ class NowPlayingViewModel(
 ) : ViewModel() {
 
     private val lastScrobbledFlow = historyDao.getRecentFlow(1)
-    private val lastFmArtworkFlow = MutableStateFlow<String?>(null)
-    private var lastLookedUpTrack: Track? = null
-    private var artworkJob: Job? = null
+    private data class Artwork(val track: Pair<String, String>, val url: String?)
+
+    private val failedPlayerArtwork = MutableStateFlow<Artwork?>(null)
+    private val playerArtworkUri = combine(
+        playbackTracker.activeTrackFlow, playbackTracker.artworkUriFlow, failedPlayerArtwork
+    ) { track, uri, failed ->
+        uri?.takeUnless { failed != null && failed.url == it && failed.track.first == track?.artist && failed.track.second == track?.title }
+    }
+
+    fun reportArtworkFailure(artist: String, title: String, uri: String) {
+        val current = playbackTracker.activeTrackFlow.value ?: return
+        if (current.artist == artist && current.title == title && playbackTracker.artworkUriFlow.value == uri) {
+            failedPlayerArtwork.value = Artwork(artist to title, uri)
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val lastFmArtworkFlow = combine(
+        playbackTracker.activeTrackFlow,
+        playbackTracker.artworkBitmapFlow,
+        playerArtworkUri
+    ) { track, bitmap, uri ->
+        if (track != null && bitmap == null && uri.isNullOrBlank()) track.artist to track.title else null
+    }.distinctUntilChanged().flatMapLatest { key ->
+        flow<Artwork?> {
+            emit(null)
+            if (key != null) emit(Artwork(key, lastFmClient.getTrackArtworkUrl(key.first, key.second)))
+        }
+    }
 
     val uiState: StateFlow<NowPlayingUiState> = combine(
         playbackTracker.activeTrackFlow,
@@ -85,7 +113,7 @@ class NowPlayingViewModel(
         scrobbleEngine.currentSessionFlow,
         settingsRepository.settingsFlow,
         playbackTracker.artworkBitmapFlow,
-        playbackTracker.artworkUriFlow,
+        playerArtworkUri,
         lastScrobbledFlow,
         lastFmArtworkFlow,
         lastFmClient.connectionErrorFlow
@@ -99,34 +127,14 @@ class NowPlayingViewModel(
         val artworkBitmap = args[6] as? Bitmap
         val mediaUri = args[7] as? String
         val recentList = args[8] as? List<*>
-        val lastFmArtwork = args[9] as? String
+        val fallback = args[9] as? Artwork
+        val lastFmArtwork = fallback?.takeIf { it.track.first == track?.artist && it.track.second == track?.title }?.url
         val connectionError = args[10] as? String
         val lastScrobbled = recentList?.firstOrNull() as? HistoryItemEntity
 
-        val currentTrack = track ?: session?.track
+        val currentTrack = track
         val durationMs = currentTrack?.durationMs
-        val listenedMs = session?.totalListenedMs(clock) ?: 0L
-
-        if (currentTrack != null && currentTrack != lastLookedUpTrack) {
-            lastLookedUpTrack = currentTrack
-            artworkJob?.cancel()
-            lastFmArtworkFlow.value = null
-
-            // If neither direct Bitmap nor local Media Uri is provided by player, query Last.fm
-            if (artworkBitmap == null && mediaUri.isNullOrBlank()) {
-                val lookupTarget = currentTrack
-                artworkJob = viewModelScope.launch {
-                    val art = lastFmClient.getTrackArtworkUrl(lookupTarget.artist, lookupTarget.title)
-                    if (isActive && lastLookedUpTrack == lookupTarget) {
-                        lastFmArtworkFlow.value = art
-                    }
-                }
-            }
-        } else if (currentTrack == null) {
-            artworkJob?.cancel()
-            lastLookedUpTrack = null
-            lastFmArtworkFlow.value = null
-        }
+        val listenedMs = session?.takeIf { it.track.artist == track?.artist && it.track.title == track?.title && it.track.sourcePackage == track?.sourcePackage }?.totalListenedMs(clock) ?: 0L
 
         val effectiveArtworkUrl = if (!mediaUri.isNullOrBlank()) mediaUri else lastFmArtwork
 
@@ -153,11 +161,12 @@ class NowPlayingViewModel(
             durationMs = durationMs,
             thresholdMs = thresholdMs,
             minListenedPercent = settings.minListenedPercent,
+            tooShort = durationMs != null && durationMs < settings.minTrackDurationMs,
             thresholdProgress = thresholdProgress,
             trackProgress = trackProgress,
             artwork = artworkBitmap,
             artworkUrl = effectiveArtworkUrl,
-            lastFmArtworkUrl = effectiveArtworkUrl,
+            lastFmArtworkUrl = lastFmArtwork,
             sourcePackage = currentTrack?.sourcePackage.orEmpty(),
             lastScrobbledTrack = lastScrobbled,
             connectionError = connectionError
