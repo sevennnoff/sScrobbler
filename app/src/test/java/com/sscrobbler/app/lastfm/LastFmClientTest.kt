@@ -1,5 +1,6 @@
 package com.sscrobbler.app.lastfm
 
+import com.sscrobbler.app.database.PendingScrobbleEntity
 import kotlinx.coroutines.runBlocking
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -81,5 +82,25 @@ class LastFmClientTest {
         val session = (res as LastFmResult.Success).data
         assertEquals("sevennnoff", session.name)
         assertEquals("session_key_abc", session.key)
+    }
+
+    private fun entry(id: String) = PendingScrobbleEntity(
+        id, "Artist", "Song", null, null, 200, 123L, "player", 123L, id
+    )
+
+    @Test
+    fun mixedScrobbleResponsePreservesEntryOrder() = runBlocking {
+        val response = """{"scrobbles":{"@attr":{"accepted":1,"ignored":1},"scrobble":[{"ignoredMessage":{"code":"5"}},{"ignoredMessage":{"code":"0"}}]}}"""
+        val client = createClientWithResponse(200, response)
+        assertEquals(LastFmResult.Success(listOf(5, 0)), client.scrobbleBatch(listOf(entry("a"), entry("b")), "key"))
+    }
+
+    @Test
+    fun incompleteOrHtmlResponseCannotAcknowledgeAPlay() = runBlocking {
+        val invalid = listOf("<html>Unavailable</html>", "{}", """{"scrobbles":{"@attr":{"accepted":1,"ignored":0}}}""")
+        for (body in invalid) {
+            val client = createClientWithResponse(200, body)
+            assertTrue(client.scrobbleBatch(listOf(entry("a")), "key") is LastFmResult.Error)
+        }
     }
 }

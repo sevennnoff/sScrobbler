@@ -1,6 +1,12 @@
 package com.sscrobbler.app
 
 import android.app.Application
+import com.sscrobbler.app.scrobble.worker.ScrobbleWorker
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import com.sscrobbler.app.database.AppDatabase
 import com.sscrobbler.app.lastfm.LastFmAuthRepository
 import com.sscrobbler.app.lastfm.LastFmClient
@@ -22,10 +28,8 @@ class SScrobblerApplication : Application() {
         ScrobbleEngine(
             pendingScrobbleDao = database.pendingScrobbleDao(),
             historyDao = database.historyDao(),
-            lastFmClient = lastFmClient,
-            authRepository = authRepository,
             settingsRepository = settingsRepository,
-            networkDetector = networkDetector
+            scheduleUpload = { ScrobbleWorker.enqueueNow(this) }
         )
     }
 
@@ -41,5 +45,11 @@ class SScrobblerApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        ScrobbleWorker.schedulePeriodic(this)
+        CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
+            authRepository.sessionKeyFlow.distinctUntilChanged().collect { key ->
+                if (!key.isNullOrBlank()) ScrobbleWorker.enqueueNow(this@SScrobblerApplication)
+            }
+        }
     }
 }

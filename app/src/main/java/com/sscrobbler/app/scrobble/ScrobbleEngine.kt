@@ -4,9 +4,6 @@ import com.sscrobbler.app.database.HistoryDao
 import com.sscrobbler.app.database.HistoryItemEntity
 import com.sscrobbler.app.database.PendingScrobbleDao
 import com.sscrobbler.app.database.PendingScrobbleEntity
-import com.sscrobbler.app.lastfm.LastFmAuthRepository
-import com.sscrobbler.app.lastfm.LastFmClient
-import com.sscrobbler.app.lastfm.LastFmResult
 import com.sscrobbler.app.model.PlaybackSession
 import com.sscrobbler.app.model.ScrobbleStatus
 import com.sscrobbler.app.model.Track
@@ -15,7 +12,6 @@ import com.sscrobbler.app.settings.SettingsRepository
 import com.sscrobbler.app.util.Clock
 import com.sscrobbler.app.util.DebugLog
 import com.sscrobbler.app.util.HashUtils
-import com.sscrobbler.app.util.NetworkDetector
 import com.sscrobbler.app.util.SystemClockImpl
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,10 +30,8 @@ enum class FinalizeReason {
 class ScrobbleEngine(
     private val pendingScrobbleDao: PendingScrobbleDao,
     private val historyDao: HistoryDao,
-    private val lastFmClient: LastFmClient,
-    private val authRepository: LastFmAuthRepository,
     private val settingsRepository: SettingsRepository,
-    private val networkDetector: NetworkDetector,
+    private val scheduleUpload: () -> Unit,
     private val clock: Clock = SystemClockImpl
 ) {
     var currentSession: PlaybackSession? = null
@@ -56,7 +50,7 @@ class ScrobbleEngine(
         val settings = settingsRepository.getSettings()
 
         // Check package filter
-        if (settings.packageFilter[track.sourcePackage] == false) {
+        if (!(settings.packageFilter[track.sourcePackage] ?: settings.defaultNewAppsAllowed)) {
             DebugLog.log("ENGINE", "IGNORED ${track.artist} - ${track.title} (app ${track.sourcePackage} disabled)")
             finalizeCurrentSession(FinalizeReason.TrackChanged)
             return
@@ -84,6 +78,12 @@ class ScrobbleEngine(
             "START ${track.artist} - ${track.title}" +
                 (track.durationMs?.let { " (${it / 1000}s)" } ?: " (duration unknown)")
         )
+    }
+
+    fun updateTrackMetadata(track: Track) {
+        val session = currentSession ?: return
+        currentSession = session.copy(track = track)
+        _currentSessionFlow.value = currentSession
     }
 
     suspend fun onPlaybackStateChanged(isPlaying: Boolean) {
@@ -150,7 +150,7 @@ class ScrobbleEngine(
             // Check pause timeout
             pausedAtElapsedMs?.let { pausedAt ->
                 val pausedDuration = clock.elapsedRealtime() - pausedAt
-                if (pausedDuration >= settings.pauseTimeoutMs) {
+                if (settings.pauseTimeoutMs > 0 && pausedDuration >= settings.pauseTimeoutMs) {
                     finalizeCurrentSession(FinalizeReason.PauseTimeout)
                 }
             }
@@ -175,9 +175,7 @@ class ScrobbleEngine(
             maxRequiredTimeMs = currentSettings.maxRequiredTimeMs
         )
 
-        if (listened >= threshold) {
-            session.eligible = true
-        }
+        session.eligible = listened >= threshold
     }
 
     suspend fun finalizeCurrentSession(reason: FinalizeReason = FinalizeReason.TrackChanged) {
@@ -204,9 +202,20 @@ class ScrobbleEngine(
             "FINISH($reason) ${track.artist} - ${track.title} | listened ${listenedSec}s / need ${thresholdSec}s | eligible=${session.eligible}"
         )
 
+        val status = if (session.eligible) ScrobbleStatus.Pending else ScrobbleStatus.Skipped
+        val history = HistoryItemEntity(
+            id = recordId,
+            artist = track.artist,
+            title = track.title,
+            album = track.album,
+            durationSeconds = durationSec,
+            listenedSeconds = listenedSec,
+            timestamp = timestamp,
+            status = status,
+            sourcePackage = track.sourcePackage
+        )
         if (session.eligible) {
-            val fingerprint = HashUtils.sha256("${track.artist}|${track.title}|$timestamp")
-            val pendingEntity = PendingScrobbleEntity(
+            val entry = PendingScrobbleEntity(
                 id = recordId,
                 artist = track.artist,
                 title = track.title,
@@ -216,112 +225,19 @@ class ScrobbleEngine(
                 timestamp = timestamp,
                 sourcePackage = track.sourcePackage,
                 createdAt = clock.currentTimeMillis(),
-                fingerprint = fingerprint
+                fingerprint = HashUtils.sha256("${track.artist}|${track.title}|$timestamp")
             )
-
-            // Save to pending scrobbles
-            pendingScrobbleDao.insert(pendingEntity)
-
-            // Fetch album artwork if available
-            val artUrl = if (networkDetector.isOnline()) {
-                lastFmClient.getTrackArtworkUrl(track.artist, track.title)
-            } else null
-
-            // Save to history as Pending
-            val historyEntity = HistoryItemEntity(
-                id = recordId,
-                artist = track.artist,
-                title = track.title,
-                album = track.album,
-                durationSeconds = durationSec,
-                listenedSeconds = listenedSec,
-                timestamp = timestamp,
-                status = ScrobbleStatus.Pending,
-                sourcePackage = track.sourcePackage,
-                artworkUrl = artUrl
-            )
-            historyDao.insert(historyEntity)
-            _statusFlow.value = ScrobbleStatus.Pending
-
-            // Try sending immediately if online
-            if (networkDetector.isOnline()) {
-                val sessionKey = authRepository.getSessionKey()
-                if (!sessionKey.isNullOrBlank()) {
-                    val result = lastFmClient.scrobble(
-                        artist = track.artist,
-                        track = track.title,
-                        timestamp = timestamp,
-                        album = track.album,
-                        albumArtist = track.albumArtist,
-                        durationSeconds = durationSec,
-                        sessionKey = sessionKey
-                    )
-                    if (result is LastFmResult.Success) {
-                        pendingScrobbleDao.deleteById(recordId)
-                        historyDao.updateStatus(recordId, ScrobbleStatus.Scrobbled)
-                        _statusFlow.value = ScrobbleStatus.Scrobbled
-                        DebugLog.log("ENGINE", "SCROBBLED ${track.artist} - ${track.title}")
-                    } else if (result is LastFmResult.Error) {
-                        DebugLog.log("ENGINE", "SCROBBLE FAILED ${track.artist} - ${track.title}: ${result.message} (queued)")
-                    }
-                } else {
-                    DebugLog.log("ENGINE", "SCROBBLE queued: no Last.fm session key")
-                }
-            } else {
-                DebugLog.log("ENGINE", "SCROBBLE queued: offline")
-            }
+            pendingScrobbleDao.enqueue(entry, history)
+            scheduleUpload()
         } else {
-            DebugLog.log("ENGINE", "SKIPPED (below threshold) ${track.artist} - ${track.title}")
-            // Not eligible -> Skipped
-            val artUrl = if (networkDetector.isOnline()) {
-                lastFmClient.getTrackArtworkUrl(track.artist, track.title)
-            } else null
-
-            val historyEntity = HistoryItemEntity(
-                id = recordId,
-                artist = track.artist,
-                title = track.title,
-                album = track.album,
-                durationSeconds = durationSec,
-                listenedSeconds = listenedSec,
-                timestamp = timestamp,
-                status = ScrobbleStatus.Skipped,
-                sourcePackage = track.sourcePackage,
-                artworkUrl = artUrl
-            )
-            historyDao.insert(historyEntity)
-            _statusFlow.value = ScrobbleStatus.Skipped
+            historyDao.insert(history)
         }
 
+        _statusFlow.value = status
         currentSession = null
         _currentSessionFlow.value = null
         lastKnownPositionMs = null
         pausedAtElapsedMs = null
-    }
-
-    suspend fun processPendingQueue(batchSize: Int = 50): Int {
-        if (!networkDetector.isOnline()) return 0
-        val sessionKey = authRepository.getSessionKey() ?: return 0
-        if (sessionKey.isBlank()) return 0
-
-        val pendingList = pendingScrobbleDao.getBatch(batchSize)
-        if (pendingList.isEmpty()) return 0
-
-        val result = lastFmClient.scrobbleBatch(pendingList, sessionKey)
-        return if (result is LastFmResult.Success) {
-            val ids = pendingList.map { it.id }
-            pendingScrobbleDao.deleteByIds(ids)
-            for (id in ids) {
-                historyDao.updateStatus(id, ScrobbleStatus.Scrobbled)
-            }
-            _statusFlow.value = ScrobbleStatus.Scrobbled
-            DebugLog.log("ENGINE", "QUEUE flushed ${ids.size} scrobble(s)")
-            ids.size
-        } else {
-            val msg = (result as? LastFmResult.Error)?.message ?: "unknown error"
-            DebugLog.log("ENGINE", "QUEUE flush failed (${pendingList.size}): $msg")
-            0
-        }
     }
 
     companion object {

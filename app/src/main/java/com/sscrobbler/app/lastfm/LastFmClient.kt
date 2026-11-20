@@ -8,6 +8,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.FormBody
@@ -129,25 +132,27 @@ open class LastFmClient(
         }
     }
 
-    private fun checkError(responseBody: String, httpCode: Int): LastFmResult<Unit> {
-        val trimmed = responseBody.trim()
-        if (trimmed.startsWith("{")) {
-            try {
-                val element = json.parseToJsonElement(trimmed)
-                val obj = element.jsonObject
-                if (obj.containsKey("error")) {
-                    val err = parseLastFmError(trimmed, httpCode)
-                    return LastFmResult.Error(err.code, err.message)
-                } else {
-                    return LastFmResult.Success(Unit)
-                }
-            } catch (_: Exception) {}
+    private fun parseReceipts(body: String, httpCode: Int, count: Int): LastFmResult<List<Int>> {
+        val root = runCatching { json.parseToJsonElement(body) as? JsonObject }.getOrNull()
+        if (httpCode !in 200..299 || root == null || "error" in root) return parseLastFmError(body, httpCode)
+
+        val invalid = LastFmResult.Error(null, "Last.fm returned an incomplete scrobble receipt")
+        val response = root["scrobbles"] as? JsonObject ?: return invalid
+        val entries = when (val entry = response["scrobble"]) {
+            is JsonObject -> listOf(entry)
+            is JsonArray -> entry
+            else -> return invalid
         }
-        if (httpCode in 200..299 && !trimmed.contains("<error")) {
-            return LastFmResult.Success(Unit)
+        if (entries.size != count) return invalid
+        val codes = entries.map { entry ->
+            val message = (entry as? JsonObject)?.get("ignoredMessage") as? JsonObject ?: return invalid
+            (message["code"] as? JsonPrimitive)?.intOrNull ?: return invalid
         }
-        val err = parseLastFmError(trimmed, httpCode)
-        return LastFmResult.Error(err.code, err.message)
+        val totals = response["@attr"] as? JsonObject ?: return invalid
+        val accepted = (totals["accepted"] as? JsonPrimitive)?.intOrNull
+        val ignored = (totals["ignored"] as? JsonPrimitive)?.intOrNull
+        if (accepted != codes.count { it == 0 } || ignored != codes.count { it != 0 }) return invalid
+        return LastFmResult.Success(codes)
     }
 
     open suspend fun getToken(): LastFmResult<String> = withContext(Dispatchers.IO) {
@@ -221,7 +226,12 @@ open class LastFmClient(
         params["format"] = "json"
 
         executePost(params) { responseBody, httpCode ->
-            checkError(responseBody, httpCode)
+            val root = runCatching { json.parseToJsonElement(responseBody) as? JsonObject }.getOrNull()
+            if (httpCode in 200..299 && root?.get("nowplaying") is JsonObject && "error" !in root) {
+                LastFmResult.Success(Unit)
+            } else {
+                parseLastFmError(responseBody, httpCode)
+            }
         }
     }
 
@@ -251,15 +261,19 @@ open class LastFmClient(
         params["format"] = "json"
 
         executePost(params) { responseBody, httpCode ->
-            checkError(responseBody, httpCode)
+            when (val receipt = parseReceipts(responseBody, httpCode, 1)) {
+                is LastFmResult.Error -> receipt
+                is LastFmResult.Success -> if (receipt.data.single() == 0) LastFmResult.Success(Unit)
+                    else LastFmResult.Error(null, "Last.fm ignored this scrobble (code ${receipt.data.single()})")
+            }
         }
     }
 
     open suspend fun scrobbleBatch(
         items: List<PendingScrobbleEntity>,
         sessionKey: String
-    ): LastFmResult<Unit> = withContext(Dispatchers.IO) {
-        if (items.isEmpty()) return@withContext LastFmResult.Success(Unit)
+    ): LastFmResult<List<Int>> = withContext(Dispatchers.IO) {
+        if (items.isEmpty()) return@withContext LastFmResult.Success(emptyList())
 
         val batch = items.take(50)
         val params = mutableMapOf(
@@ -282,7 +296,7 @@ open class LastFmClient(
         params["format"] = "json"
 
         executePost(params) { responseBody, httpCode ->
-            checkError(responseBody, httpCode)
+            parseReceipts(responseBody, httpCode, batch.size)
         }
     }
 
@@ -334,7 +348,8 @@ open class LastFmClient(
             }
             _connectionErrorFlow.value = null
             val root = json.parseToJsonElement(body).jsonObject
-            val recenttracks = root["recenttracks"]?.jsonObject ?: return@withContext LastFmResult.Success(emptyList())
+            val recenttracks = root["recenttracks"] as? JsonObject
+                ?: return@withContext parseLastFmError(body, response.code)
             val trackElement = recenttracks["track"] ?: return@withContext LastFmResult.Success(emptyList())
 
             val trackListJson = if (trackElement is JsonArray) {
