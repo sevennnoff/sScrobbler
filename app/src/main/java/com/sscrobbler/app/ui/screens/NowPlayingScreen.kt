@@ -1,291 +1,167 @@
 package com.sscrobbler.app.ui.screens
 
 import android.graphics.Bitmap
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.CloudOff
-import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Headphones
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.PlayCircleOutline
-import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil.compose.AsyncImage
 import com.sscrobbler.app.database.HistoryItemEntity
-import com.sscrobbler.app.model.ScrobbleStatus
+import com.sscrobbler.app.model.Track
 import com.sscrobbler.app.ui.components.StatusBadge
-import com.sscrobbler.app.ui.theme.ArtworkShape
-import com.sscrobbler.app.ui.theme.CardShape
-import com.sscrobbler.app.ui.theme.ChipShape
 import com.sscrobbler.app.ui.theme.PillShape
 import com.sscrobbler.app.ui.viewmodel.NowPlayingUiState
 import com.sscrobbler.app.ui.viewmodel.NowPlayingViewModel
 
 @Composable
-fun NowPlayingScreen(
-    viewModel: NowPlayingViewModel,
-    modifier: Modifier = Modifier
-) {
-    val state by viewModel.uiState.collectAsState()
-
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(20.dp)
-    ) {
-        if (!state.connectionError.isNullOrBlank()) {
-            LastFmConnectionErrorBanner(error = state.connectionError)
-        }
-
-        if (state.track != null) {
-            ActiveTrackCard(state = state)
-        } else {
-            IdleStateCard(lastScrobbled = state.lastScrobbledTrack)
-        }
-    }
+fun NowPlayingScreen(viewModel: NowPlayingViewModel, modifier: Modifier = Modifier) {
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    NowPlayingContent(state, modifier)
 }
 
 @Composable
-fun LastFmConnectionErrorBanner(error: String?) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = CardShape,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Surface(
-                shape = ChipShape,
-                color = MaterialTheme.colorScheme.error.copy(alpha = 0.2f),
-                modifier = Modifier.size(38.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.Default.CloudOff,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Last.fm Unreachable",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onErrorContainer
-                )
-                Text(
-                    text = error ?: "Check VPN or network connection. Scrobbles will be saved offline and synced automatically later.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun ActiveTrackCard(state: NowPlayingUiState) {
-    val track = state.track ?: return
-
-    // Expressive Artwork Card
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .aspectRatio(1f),
-        shape = ArtworkShape,
-        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        val artworkKey = "${track.artist}-${track.title}"
-        androidx.compose.runtime.key(artworkKey) {
-            if (state.artwork != null) {
-                val imageBitmap = androidx.compose.runtime.remember(state.artwork) { state.artwork.asImageBitmap() }
-                Image(
-                    bitmap = imageBitmap,
-                    contentDescription = "${track.title} artwork",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
-            } else if (!state.artworkUrl.isNullOrBlank()) {
-                coil.compose.AsyncImage(
-                    model = state.artworkUrl,
-                    contentDescription = "${track.title} artwork",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
-            } else {
-                ArtworkPlaceholder(title = track.title, artist = track.artist)
-            }
-        }
-    }
-
-    // Status Badge with prominent accent
-    StatusBadge(
-        status = state.status,
-        showSubtext = true,
-        modifier = Modifier.padding(top = 4.dp)
-    )
-
-    // Track Title & Artist Metadata
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
-    ) {
-        Text(
-            text = track.title,
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface,
-            textAlign = TextAlign.Center,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
-
-        Spacer(modifier = Modifier.height(4.dp))
-
-        Text(
-            text = track.artist,
-            style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-
-        if (!track.album.isNullOrBlank()) {
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = track.album,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-
-        if (track.sourcePackage.isNotBlank()) {
-            Spacer(modifier = Modifier.height(10.dp))
-            SourceAppChip(packageName = track.sourcePackage)
-        }
-    }
-
-    // Live Listening Indicator & Progress Card
-    ListeningProgressCard(state = state)
-}
-
-@Composable
-fun ArtworkPlaceholder(title: String, artist: String) {
-    val gradient = Brush.linearGradient(
-        colors = listOf(
-            MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
-            MaterialTheme.colorScheme.tertiary.copy(alpha = 0.75f),
-            MaterialTheme.colorScheme.secondary.copy(alpha = 0.85f)
-        )
-    )
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(gradient),
-        contentAlignment = Alignment.Center
-    ) {
+internal fun NowPlayingContent(state: NowPlayingUiState, modifier: Modifier = Modifier) {
+    BoxWithConstraints(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        val wide = maxWidth >= 600.dp
+        val coverSize = if (wide) 208.dp else (maxHeight * 0.41f).coerceIn(148.dp, 320.dp)
         Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier = Modifier.padding(24.dp)
+            modifier = Modifier.widthIn(max = 760.dp).fillMaxSize().verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Surface(
-                shape = CircleShape,
-                color = Color.White.copy(alpha = 0.2f),
-                modifier = Modifier.size(80.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.Default.MusicNote,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(44.dp)
-                    )
+            Text("Now playing", style = MaterialTheme.typography.headlineLarge)
+            state.connectionError?.let { error ->
+                Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.errorContainer) {
+                    Row(Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Icon(Icons.Default.CloudOff, null)
+                        Text(error, style = MaterialTheme.typography.bodyMedium)
+                    }
                 }
             }
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-                color = Color.White,
-                textAlign = TextAlign.Center,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = artist,
-                style = MaterialTheme.typography.bodyMedium,
-                color = Color.White.copy(alpha = 0.85f),
-                textAlign = TextAlign.Center,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            val track = state.track
+            if (track == null) {
+                IdleStateCard(state.lastScrobbledTrack)
+            } else {
+                Surface(
+                    shape = MaterialTheme.shapes.extraLarge,
+                    color = MaterialTheme.colorScheme.surfaceContainer
+                ) {
+                    if (wide) {
+                        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                            CoverArt(track, state.artwork, state.artworkUrl, state.isPlaying, Modifier.size(coverSize))
+                            TrackDetails(state, track, Modifier.weight(1f))
+                        }
+                    } else {
+                        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                            CoverArt(track, state.artwork, state.artworkUrl, state.isPlaying,
+                                Modifier.align(Alignment.CenterHorizontally).size(coverSize))
+                            TrackDetails(state, track, Modifier.fillMaxWidth())
+                        }
+                    }
+                }
+                key(track.artist, track.title, track.sourcePackage) { ListeningProgress(state) }
+            }
+        }
+    }
+}
+
+private data class Cover(val bitmap: Bitmap?, val url: String?, val artist: String, val title: String)
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun CoverArt(track: Track, bitmap: Bitmap?, url: String?, playing: Boolean, modifier: Modifier) {
+    val corner by animateDpAsState(if (playing) 44.dp else 16.dp,
+        animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(), label = "cover corners")
+    val shape = RoundedCornerShape(topStart = corner, topEnd = 16.dp, bottomEnd = corner, bottomStart = 16.dp)
+    Crossfade(
+        targetState = Cover(bitmap, url, track.artist, track.title),
+        animationSpec = MaterialTheme.motionScheme.fastEffectsSpec(),
+        modifier = modifier.clip(shape).background(MaterialTheme.colorScheme.primaryContainer),
+        label = "album cover"
+    ) { cover ->
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Record(Modifier.fillMaxSize(0.78f))
+            if (cover.bitmap != null) {
+                Image(remember(cover.bitmap) { cover.bitmap.asImageBitmap() }, null,
+                    Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            } else if (!cover.url.isNullOrBlank()) {
+                AsyncImage(model = cover.url, contentDescription = null, modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop)
+            }
         }
     }
 }
 
 @Composable
-fun SourceAppChip(packageName: String) {
+private fun Record(modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    Canvas(modifier) {
+        val r = size.minDimension / 2f
+        drawCircle(colors.onPrimaryContainer, r)
+        for (groove in 0..5) {
+            drawCircle(colors.primaryContainer.copy(alpha = 0.23f), r * (0.48f + groove * 0.086f),
+                style = Stroke(width = 1.dp.toPx()))
+        }
+        drawCircle(colors.tertiaryContainer, r * 0.37f)
+        drawCircle(colors.tertiary, r * 0.075f)
+        drawCircle(colors.onTertiaryContainer, r * 0.028f, Offset(center.x, center.y - r * 0.21f))
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TrackDetails(state: NowPlayingUiState, track: Track, modifier: Modifier) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            StatusBadge(state.status, showSubtext = false)
+            if (track.sourcePackage.isNotBlank()) SourceAppChip(track.sourcePackage)
+        }
+        AnimatedContent(targetState = track, label = "track details") { item ->
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(item.title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Text(item.artist, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+                state.durationMs?.let {
+                    Text("Track length · ${state.durationFormatted}", style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                item.album?.takeIf { it.isNotBlank() }?.let {
+                    Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SourceAppChip(packageName: String) {
     val prettyName = when (packageName) {
         "com.spotify.music" -> "Spotify"
         "com.google.android.apps.youtube.music" -> "YouTube Music"
@@ -303,7 +179,7 @@ fun SourceAppChip(packageName: String) {
 
     Surface(
         shape = PillShape,
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
         modifier = Modifier.padding(vertical = 2.dp)
     ) {
         Row(
@@ -327,195 +203,51 @@ fun SourceAppChip(packageName: String) {
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun ListeningProgressCard(state: NowPlayingUiState) {
-    val animatedProgress by animateFloatAsState(
-        targetValue = state.thresholdProgress,
-        animationSpec = androidx.compose.animation.core.spring(
-            dampingRatio = 0.82f,
-            stiffness = 500f
-        ),
-        label = "thresholdProgress"
-    )
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = CardShape,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            // Header: Live Listened Time
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(
-                        imageVector = Icons.Default.GraphicEq,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Text(
-                        text = "${state.listenedFormatted} listened",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-
-                Text(
-                    text = "Goal: ${state.thresholdFormatted} (${state.minListenedPercent}%)",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = FontWeight.Medium
+private fun ListeningProgress(state: NowPlayingUiState) {
+    val progress by animateFloatAsState(state.thresholdProgress,
+        animationSpec = MaterialTheme.motionScheme.fastEffectsSpec(), label = "listened time")
+    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.secondaryContainer) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Listening time", style = MaterialTheme.typography.labelLarge)
+            Text(state.listenedFormatted, style = MaterialTheme.typography.displaySmall)
+            if (state.tooShort) {
+                Text("Below your minimum track length", style = MaterialTheme.typography.bodyMedium)
+            } else {
+                LinearWavyProgressIndicator(
+                    progress = { progress.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Scrobble progress" },
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.18f),
+                    amplitude = { if (state.isPlaying && it < 1f) 1f else 0f },
+                    waveSpeed = if (state.isPlaying && state.thresholdProgress < 1f) 16.dp else 0.dp
                 )
-            }
-
-            // Animated progress bar towards threshold
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                LinearProgressIndicator(
-                    progress = { animatedProgress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(10.dp)
-                        .clip(CircleShape),
-                    color = if (state.thresholdProgress >= 1f) {
-                        MaterialTheme.colorScheme.tertiary
-                    } else {
-                        MaterialTheme.colorScheme.primary
-                    },
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    val percentInt = (state.thresholdProgress * 100).toInt().coerceIn(0, 100)
-                    Text(
-                        text = "$percentInt% to scrobble eligibility",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (state.durationMs != null && state.durationMs > 0) {
-                        Text(
-                            text = "Track total: ${state.durationFormatted}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
+                val detail = if (state.thresholdProgress >= 1f) "Submits when playback ends"
+                    else "Scrobble threshold · ${state.thresholdFormatted}"
+                Text(detail, style = MaterialTheme.typography.bodyMedium)
             }
         }
     }
 }
 
 @Composable
-fun IdleStateCard(lastScrobbled: HistoryItemEntity?) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(20.dp)
-    ) {
-        Card(
-            modifier = Modifier
-                .size(160.dp),
-            shape = CircleShape,
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Headphones,
-                    contentDescription = null,
-                    modifier = Modifier.size(72.dp),
-                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
-                )
-            }
+private fun IdleStateCard(recent: HistoryItemEntity?) {
+    Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.primaryContainer) {
+        Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Record(Modifier.size(100.dp))
+            Spacer(Modifier.height(4.dp))
+            Text("Waiting for music", style = MaterialTheme.typography.headlineMedium)
+            Text("Start a track in your music player to see it here.", style = MaterialTheme.typography.bodyMedium)
         }
-
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                text = "No Music Playing",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                text = "Play music in Spotify, Qobuz, Apple Music, YouTube Music or your player — sScrobbler tracks playback automatically.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 24.dp)
-            )
-        }
-
-        if (lastScrobbled != null) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = CardShape,
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-            ) {
-                Column(
-                    modifier = Modifier.padding(18.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "LAST SCROBBLED TRACK",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary,
-                        letterSpacing = 1.sp
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Surface(
-                            shape = ChipShape,
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            modifier = Modifier.size(44.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Default.MusicNote,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                            }
-                        }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = lastScrobbled.title,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = lastScrobbled.artist,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        StatusBadge(status = lastScrobbled.status, showSubtext = false)
-                    }
-                }
+    }
+    if (recent != null) {
+        Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainer) {
+            Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Last played", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text(recent.title, style = MaterialTheme.typography.titleLarge)
+                Text(recent.artist, style = MaterialTheme.typography.bodyMedium)
+                StatusBadge(recent.status, showSubtext = false)
             }
         }
     }

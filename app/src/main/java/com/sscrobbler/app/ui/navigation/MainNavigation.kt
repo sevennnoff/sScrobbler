@@ -2,27 +2,39 @@ package com.sscrobbler.app.ui.navigation
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sscrobbler.app.ui.screens.AppsScreen
 import com.sscrobbler.app.ui.screens.DebugScreen
 import com.sscrobbler.app.ui.screens.HistoryScreen
@@ -43,6 +55,14 @@ enum class AppDestination {
     Onboarding
 }
 
+private data class Tab(val route: AppDestination, val label: String, val icon: ImageVector)
+private val tabs = listOf(
+    Tab(AppDestination.NowPlaying, "Now playing", Icons.Default.MusicNote),
+    Tab(AppDestination.History, "History", Icons.Default.History),
+    Tab(AppDestination.Settings, "Settings", Icons.Default.Settings)
+)
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun MainNavigation(
     nowPlayingViewModel: NowPlayingViewModel,
@@ -52,115 +72,102 @@ fun MainNavigation(
     initialDestination: AppDestination = AppDestination.NowPlaying,
     modifier: Modifier = Modifier
 ) {
-    var currentDestination by rememberSaveable {
-        mutableStateOf(initialDestination)
-    }
-
-    // Predictive back handling
+    var currentDestination by rememberSaveable { mutableStateOf(initialDestination) }
+    val states = rememberSaveableStateHolder()
+    val spatial = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
+    val fade = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
     BackHandler(enabled = currentDestination != AppDestination.NowPlaying && currentDestination != AppDestination.Onboarding) {
-        when (currentDestination) {
-            AppDestination.Apps, AppDestination.Debug -> currentDestination = AppDestination.Settings
-            AppDestination.History, AppDestination.Settings -> currentDestination = AppDestination.NowPlaying
-            else -> {}
+        currentDestination = when (currentDestination) {
+            AppDestination.Apps, AppDestination.Debug -> AppDestination.Settings
+            else -> AppDestination.NowPlaying
         }
     }
-
-    val showBottomBar = currentDestination in listOf(
-        AppDestination.NowPlaying,
-        AppDestination.History,
-        AppDestination.Settings
-    )
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
         bottomBar = {
-            if (showBottomBar) {
-                NavigationBar {
-                    NavigationBarItem(
-                        selected = currentDestination == AppDestination.NowPlaying,
-                        onClick = { currentDestination = AppDestination.NowPlaying },
-                        icon = { Icon(Icons.Default.MusicNote, contentDescription = "Now Playing") },
-                        label = { Text("Now Playing") }
-                    )
-                    NavigationBarItem(
-                        selected = currentDestination == AppDestination.History,
-                        onClick = { currentDestination = AppDestination.History },
-                        icon = { Icon(Icons.Default.History, contentDescription = "History") },
-                        label = { Text("History") }
-                    )
-                    NavigationBarItem(
-                        selected = currentDestination == AppDestination.Settings,
-                        onClick = { currentDestination = AppDestination.Settings },
-                        icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
-                        label = { Text("Settings") }
-                    )
+            if (tabs.any { it.route == currentDestination }) {
+                Box(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 14.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center) {
+                    Surface(shape = RoundedCornerShape(32.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                        Row(
+                            Modifier.widthIn(max = 450.dp).fillMaxWidth().selectableGroup().padding(4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            for (tab in tabs) {
+                                val selected = tab.route == currentDestination
+                                val interaction = remember { MutableInteractionSource() }
+                                val pressed by interaction.collectIsPressedAsState()
+                                val weight by animateFloatAsState(
+                                    if (selected) 1.85f else if (pressed) 1.2f else 1f,
+                                    MaterialTheme.motionScheme.fastSpatialSpec(), label = "tab width"
+                                )
+                                val radius by animateDpAsState(if (pressed) 14.dp else 28.dp,
+                                    MaterialTheme.motionScheme.fastSpatialSpec(), label = "tab corners")
+                                val ink = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                Row(
+                                    Modifier.weight(weight).heightIn(min = 48.dp).clip(RoundedCornerShape(radius))
+                                        .background(if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                                        .selectable(selected = selected, role = Role.Tab, interactionSource = interaction, indication = androidx.compose.foundation.LocalIndication.current,
+                                            onClick = { currentDestination = tab.route })
+                                        .padding(horizontal = 4.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(tab.icon, if (selected) null else tab.label, Modifier.size(22.dp), tint = ink)
+                                    AnimatedVisibility(selected) {
+                                        Text(tab.label, Modifier.padding(start = 6.dp), style = MaterialTheme.typography.labelLarge,
+                                            color = ink, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-    ) { innerPadding ->
+    ) { padding ->
         AnimatedContent(
             targetState = currentDestination,
             transitionSpec = {
-                val forward = targetState.ordinal > initialState.ordinal
-                val springSpec = androidx.compose.animation.core.spring<Float>(
-                    dampingRatio = 0.82f,
-                    stiffness = 700f
-                )
-                val springOffset = androidx.compose.animation.core.spring<androidx.compose.ui.unit.IntOffset>(
-                    dampingRatio = 0.82f,
-                    stiffness = 700f
-                )
-                if (forward) {
-                    (androidx.compose.animation.slideInHorizontally(springOffset) { (it * 0.28f).toInt() } +
-                     androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) +
-                     androidx.compose.animation.scaleIn(initialScale = 0.95f, animationSpec = springSpec))
-                    .togetherWith(
-                        androidx.compose.animation.slideOutHorizontally(springOffset) { -(it * 0.28f).toInt() } +
-                        androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(120)) +
-                        androidx.compose.animation.scaleOut(targetScale = 1.03f, animationSpec = springSpec)
-                    )
-                } else {
-                    (androidx.compose.animation.slideInHorizontally(springOffset) { -(it * 0.28f).toInt() } +
-                     androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) +
-                     androidx.compose.animation.scaleIn(initialScale = 1.03f, animationSpec = springSpec))
-                    .togetherWith(
-                        androidx.compose.animation.slideOutHorizontally(springOffset) { (it * 0.28f).toInt() } +
-                        androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(120)) +
-                        androidx.compose.animation.scaleOut(targetScale = 0.95f, animationSpec = springSpec)
-                    )
-                }
+                val sign = if (targetState.ordinal > initialState.ordinal) 1 else -1
+                (slideInHorizontally(spatial) { sign * it / 12 } + fadeIn(fade)) togetherWith
+                    (slideOutHorizontally(spatial) { -sign * it / 12 } + fadeOut(fade))
             },
-            label = "screenTransition",
-            modifier = Modifier.padding(innerPadding)
+            modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding),
+            label = "destination"
         ) { destination ->
-            when (destination) {
-                AppDestination.NowPlaying -> NowPlayingScreen(
-                    viewModel = nowPlayingViewModel
-                )
-                AppDestination.History -> HistoryScreen(
-                    viewModel = historyViewModel
-                )
-                AppDestination.Settings -> SettingsScreen(
-                    viewModel = settingsViewModel,
-                    onNavigateToApps = { currentDestination = AppDestination.Apps },
-                    onNavigateToLogin = { currentDestination = AppDestination.Onboarding },
-                    onOpenDebug = { currentDestination = AppDestination.Debug }
-                )
-                AppDestination.Apps -> AppsScreen(
-                    viewModel = settingsViewModel,
-                    onBack = { currentDestination = AppDestination.Settings }
-                )
-                AppDestination.Debug -> {
-                    val settingsState by settingsViewModel.uiState.collectAsState()
-                    DebugScreen(
-                        settingsState = settingsState,
+            states.SaveableStateProvider(destination.name) {
+                when (destination) {
+                    AppDestination.NowPlaying -> NowPlayingScreen(
+                        viewModel = nowPlayingViewModel
+                    )
+                    AppDestination.History -> HistoryScreen(
+                        viewModel = historyViewModel
+                    )
+                    AppDestination.Settings -> SettingsScreen(
+                        viewModel = settingsViewModel,
+                        onNavigateToApps = { currentDestination = AppDestination.Apps },
+                        onNavigateToLogin = { currentDestination = AppDestination.Onboarding },
+                        onOpenDebug = { currentDestination = AppDestination.Debug }
+                    )
+                    AppDestination.Apps -> AppsScreen(
+                        viewModel = settingsViewModel,
                         onBack = { currentDestination = AppDestination.Settings }
                     )
+                    AppDestination.Debug -> {
+                        val settingsState by settingsViewModel.uiState.collectAsStateWithLifecycle()
+                        DebugScreen(
+                            settingsState = settingsState,
+                            onBack = { currentDestination = AppDestination.Settings }
+                        )
+                    }
+                    AppDestination.Onboarding -> OnboardingScreen(
+                        viewModel = onboardingViewModel,
+                        onFinished = { currentDestination = AppDestination.NowPlaying }
+                    )
                 }
-                AppDestination.Onboarding -> OnboardingScreen(
-                    viewModel = onboardingViewModel,
-                    onFinished = { currentDestination = AppDestination.NowPlaying }
-                )
             }
         }
     }

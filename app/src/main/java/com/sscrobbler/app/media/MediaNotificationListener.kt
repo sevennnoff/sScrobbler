@@ -17,15 +17,11 @@ class MediaNotificationListener : NotificationListenerService() {
     private val sessionListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
         val app = applicationContext as? SScrobblerApplication ?: return@OnActiveSessionsChangedListener
         val tracker = app.playbackTracker
-        if (controllers != null) {
-            val adapters = controllers.map { SystemMediaControllerAdapter(it) }
-            tracker.onActiveSessionsChanged(adapters)
-        }
+        tracker.onActiveSessionsChanged(controllers.orEmpty().map { SystemMediaControllerAdapter(it) })
     }
 
     override fun onCreate() {
         super.onCreate()
-        instance = this
         val app = applicationContext as? SScrobblerApplication
         if (app != null) {
             playbackTracker = app.playbackTracker
@@ -64,6 +60,8 @@ class MediaNotificationListener : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
+        instance = null
+        playbackTracker?.onActiveSessionsChanged(emptyList())
         try {
             mediaSessionManager?.removeOnActiveSessionsChangedListener(sessionListener)
         } catch (e: Exception) {
@@ -75,6 +73,7 @@ class MediaNotificationListener : NotificationListenerService() {
         super.onDestroy()
         if (instance == this) {
             instance = null
+            playbackTracker?.onActiveSessionsChanged(emptyList())
         }
         try {
             mediaSessionManager?.removeOnActiveSessionsChangedListener(sessionListener)
@@ -85,11 +84,10 @@ class MediaNotificationListener : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         super.onNotificationPosted(sbn)
-        if (sbn == null) return
+        if (sbn == null || sbn.packageName == packageName) return
         val extras = sbn.notification?.extras ?: return
         val hasMedia = extras.containsKey(Notification.EXTRA_MEDIA_SESSION) ||
-                sbn.notification.category == Notification.CATEGORY_TRANSPORT ||
-                sbn.notification.category == Notification.CATEGORY_SERVICE
+                sbn.notification.category == Notification.CATEGORY_TRANSPORT
         if (hasMedia) {
             refreshActiveSessions()
         }
@@ -97,7 +95,8 @@ class MediaNotificationListener : NotificationListenerService() {
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
         super.onNotificationRemoved(sbn)
-        refreshActiveSessions()
+        if (sbn?.notification?.extras?.containsKey(Notification.EXTRA_MEDIA_SESSION) == true ||
+            sbn?.notification?.category == Notification.CATEGORY_TRANSPORT) refreshActiveSessions()
     }
 
     companion object {

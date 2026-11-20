@@ -3,6 +3,13 @@ package com.sscrobbler.app.ui.screens
 import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,9 +53,10 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
@@ -79,10 +87,11 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
 
-    LaunchedEffect(Unit) {
+    LifecycleResumeEffect(viewModel) {
         viewModel.checkPermissions(context)
+        onPauseOrDispose { }
     }
 
     Column(
@@ -94,7 +103,7 @@ fun SettingsScreen(
     ) {
         Text(
             text = "Settings",
-            style = MaterialTheme.typography.headlineMedium,
+            style = MaterialTheme.typography.headlineLarge,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSurface
         )
@@ -180,7 +189,7 @@ fun LastFmAccountCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = CardShape,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
     ) {
         Column(
             modifier = Modifier.padding(20.dp),
@@ -392,6 +401,7 @@ fun LastFmAccountCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ScrobblingPreferencesCard(
     state: SettingsUiState,
@@ -400,7 +410,7 @@ fun ScrobblingPreferencesCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = CardShape,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
     ) {
         Column(
             modifier = Modifier.padding(20.dp),
@@ -420,27 +430,30 @@ fun ScrobblingPreferencesCard(
                 )
             }
 
-            // 1. Min Listened Percent Slider
+            var percent by remember(state.minListenedPercent) { mutableFloatStateOf(state.minListenedPercent.toFloat()) }
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
+                        modifier = Modifier.weight(1f),
                         text = "Minimum listened percentage",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium
                     )
                     Text(
-                        text = "${state.minListenedPercent}%",
+                        text = "${percent.roundToInt()}%",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
                 Slider(
-                    value = state.minListenedPercent.toFloat(),
-                    onValueChange = { viewModel.updateMinListenedPercent(it.toInt()) },
+                    modifier = Modifier.semantics { contentDescription = "Minimum listened percentage" },
+                    value = percent,
+                    onValueChange = { percent = it },
+                    onValueChangeFinished = { viewModel.updateMinListenedPercent(percent.roundToInt()) },
                     valueRange = 10f..100f,
                     steps = 17
                 )
@@ -453,7 +466,7 @@ fun ScrobblingPreferencesCard(
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium
                 )
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -480,7 +493,7 @@ fun ScrobblingPreferencesCard(
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium
                 )
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -506,7 +519,7 @@ fun ScrobblingPreferencesCard(
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium
                 )
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -526,13 +539,13 @@ fun ScrobblingPreferencesCard(
                 }
             }
 
-            // 5. Send Now Playing toggle
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().toggleable(value = state.sendNowPlaying, role = Role.Switch,
+                    onValueChange = viewModel::updateSendNowPlaying),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
                     Text(
                         text = "Send Now Playing",
                         style = MaterialTheme.typography.bodyMedium,
@@ -546,7 +559,7 @@ fun ScrobblingPreferencesCard(
                 }
                 Switch(
                     checked = state.sendNowPlaying,
-                    onCheckedChange = { viewModel.updateSendNowPlaying(it) }
+                    onCheckedChange = null
                 )
             }
         }
@@ -563,7 +576,7 @@ fun AppsNavigationCard(
             .fillMaxWidth()
             .clickable(onClick = onClick),
         shape = CardShape,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
     ) {
         Row(
             modifier = Modifier
@@ -665,7 +678,7 @@ fun PermissionStatusCard(
             .fillMaxWidth()
             .clickable(onClick = onClick),
         shape = CardShape,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
     ) {
         Row(
             modifier = Modifier

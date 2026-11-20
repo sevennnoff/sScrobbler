@@ -38,7 +38,6 @@ class ScrobbleEngine(
         private set
 
     private var lastKnownPositionMs: Long? = null
-    private var pausedAtElapsedMs: Long? = null
 
     private val _statusFlow = MutableStateFlow<ScrobbleStatus>(ScrobbleStatus.Listening)
     val statusFlow: StateFlow<ScrobbleStatus> = _statusFlow.asStateFlow()
@@ -69,9 +68,8 @@ class ScrobbleEngine(
             eligible = false
         )
         currentSession = session
-        _currentSessionFlow.value = session
+        publishSession(session)
         lastKnownPositionMs = 0L
-        pausedAtElapsedMs = null
         _statusFlow.value = ScrobbleStatus.Listening
         DebugLog.log(
             "ENGINE",
@@ -83,23 +81,21 @@ class ScrobbleEngine(
     fun updateTrackMetadata(track: Track) {
         val session = currentSession ?: return
         currentSession = session.copy(track = track)
-        _currentSessionFlow.value = currentSession
+        currentSession?.let(::publishSession)
     }
 
     suspend fun onPlaybackStateChanged(isPlaying: Boolean) {
         val session = currentSession ?: return
         if (isPlaying) {
             session.onPlay(clock)
-            pausedAtElapsedMs = null
             checkEligibility()
-            _currentSessionFlow.value = session
+            publishSession(session)
             _statusFlow.value = if (session.eligible) ScrobbleStatus.WaitingForEnd else ScrobbleStatus.Listening
             DebugLog.log("ENGINE", "PLAY ${session.track.title} @ ${session.totalListenedMs(clock) / 1000}s listened")
         } else {
             session.onPauseOrStop(clock)
-            pausedAtElapsedMs = clock.elapsedRealtime()
             checkEligibility()
-            _currentSessionFlow.value = session
+            publishSession(session)
             _statusFlow.value = if (session.eligible) ScrobbleStatus.Eligible else ScrobbleStatus.Paused
             DebugLog.log("ENGINE", "PAUSE ${session.track.title} @ ${session.listenedMs / 1000}s listened, eligible=${session.eligible}")
         }
@@ -144,17 +140,19 @@ class ScrobbleEngine(
 
         if (session.isPlaying) {
             checkEligibility(settings)
-            _currentSessionFlow.value = session
+            publishSession(session)
             _statusFlow.value = if (session.eligible) ScrobbleStatus.WaitingForEnd else ScrobbleStatus.Listening
-        } else {
-            // Check pause timeout
-            pausedAtElapsedMs?.let { pausedAt ->
-                val pausedDuration = clock.elapsedRealtime() - pausedAt
-                if (settings.pauseTimeoutMs > 0 && pausedDuration >= settings.pauseTimeoutMs) {
-                    finalizeCurrentSession(FinalizeReason.PauseTimeout)
-                }
-            }
         }
+    }
+
+    private fun publishSession(session: PlaybackSession) {
+        // Publish a value snapshot even when a player has no usable position.
+        val elapsed = clock.elapsedRealtime()
+        val ongoing = session.lastPlayStartedElapsedMs?.let { (elapsed - it).coerceAtLeast(0L) } ?: 0L
+        _currentSessionFlow.value = session.copy(
+            listenedMs = session.listenedMs + ongoing,
+            lastPlayStartedElapsedMs = if (session.isPlaying) elapsed else null
+        )
     }
 
     private suspend fun checkEligibility(settings: AppSettings? = null) {
@@ -237,7 +235,6 @@ class ScrobbleEngine(
         currentSession = null
         _currentSessionFlow.value = null
         lastKnownPositionMs = null
-        pausedAtElapsedMs = null
     }
 
     companion object {

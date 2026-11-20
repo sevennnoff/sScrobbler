@@ -41,6 +41,7 @@ class NowPlayingViewModelTest {
     private lateinit var scrobbleEngine: ScrobbleEngine
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var historyDao: HistoryDao
+    private val lastFmClient = mockk<com.sscrobbler.app.lastfm.LastFmClient>(relaxed = true)
     private lateinit var clock: Clock
 
     private val activeTrackFlow = MutableStateFlow<Track?>(null)
@@ -74,6 +75,8 @@ class NowPlayingViewModelTest {
         coEvery { settingsRepository.settingsFlow } returns settingsFlow
         coEvery { playbackTracker.artworkBitmapFlow } returns artworkFlow
         coEvery { playbackTracker.artworkUriFlow } returns artworkUriFlow
+        coEvery { lastFmClient.connectionErrorFlow } returns MutableStateFlow(null)
+        coEvery { lastFmClient.getTrackArtworkUrl(any(), any()) } returns null
         coEvery { historyDao.getRecentFlow(1) } returns recentFlow
     }
 
@@ -89,6 +92,7 @@ class NowPlayingViewModelTest {
             scrobbleEngine = scrobbleEngine,
             settingsRepository = settingsRepository,
             historyDao = historyDao,
+            lastFmClient = lastFmClient,
             clock = clock
         )
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
@@ -109,6 +113,7 @@ class NowPlayingViewModelTest {
             scrobbleEngine = scrobbleEngine,
             settingsRepository = settingsRepository,
             historyDao = historyDao,
+            lastFmClient = lastFmClient,
             clock = clock
         )
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
@@ -159,6 +164,7 @@ class NowPlayingViewModelTest {
             scrobbleEngine = scrobbleEngine,
             settingsRepository = settingsRepository,
             historyDao = historyDao,
+            lastFmClient = lastFmClient,
             clock = clock
         )
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
