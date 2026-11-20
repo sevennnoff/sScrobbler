@@ -5,7 +5,11 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.createSavedStateHandle
+import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.ViewModel
+import kotlinx.coroutines.Job
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.sscrobbler.app.BuildConfig
@@ -41,14 +45,23 @@ data class OnboardingUiState(
 class OnboardingViewModel(
     private val settingsRepository: SettingsRepository,
     private val authRepository: LastFmAuthRepository,
-    private val lastFmClient: LastFmClient
+    private val lastFmClient: LastFmClient,
+    private val savedState: SavedStateHandle = SavedStateHandle()
 ) : ViewModel() {
 
-    private val _currentStep = MutableStateFlow(0)
+    private val _currentStep = MutableStateFlow(if (savedState.get<String>("browserToken") != null) 2 else 0)
     private val _notificationGranted = MutableStateFlow(false)
     private val _batteryIgnored = MutableStateFlow(false)
-    private val _authState = MutableStateFlow<LastFmAuthState>(LastFmAuthState.Idle)
-    private var currentToken: String? = null
+    private var currentToken: String?
+        get() = savedState["browserToken"]
+        set(value) { savedState["browserToken"] = value }
+    private var authJob: Job? = null
+
+    fun ownsBrowserToken(token: String): Boolean = token == currentToken
+
+    private val _authState = MutableStateFlow<LastFmAuthState>(
+        currentToken?.let { LastFmAuthState.WaitingForBrowser(it) } ?: LastFmAuthState.Idle
+    )
 
     val uiState: StateFlow<OnboardingUiState> = combine(
         _currentStep,
@@ -86,7 +99,7 @@ class OnboardingViewModel(
     init {
         viewModelScope.launch {
             val user = authRepository.getUsername()
-            if (!user.isNullOrBlank()) {
+            if (!user.isNullOrBlank() && currentToken == null) {
                 _authState.value = LastFmAuthState.Connected(user)
             }
         }
@@ -143,9 +156,11 @@ class OnboardingViewModel(
     }
 
     fun startBrowserAuth(context: Context) {
-        viewModelScope.launch {
-            _authState.value = LastFmAuthState.LoadingToken
-            when (val res = lastFmClient.getToken()) {
+        if (authJob?.isActive == true) return
+        _authState.value = LastFmAuthState.LoadingToken
+        authJob = viewModelScope.launch {
+            val result = currentToken?.let { com.sscrobbler.app.lastfm.LastFmResult.Success(it) } ?: lastFmClient.getToken()
+            when (val res = result) {
                 is LastFmResult.Success -> {
                     val token = res.data
                     currentToken = token
@@ -169,18 +184,21 @@ class OnboardingViewModel(
     }
 
     fun confirmBrowserAuth(tokenOverride: String? = null) {
-        val token = tokenOverride ?: currentToken
+        if (tokenOverride != null && !ownsBrowserToken(tokenOverride)) return
+        if (_authState.value == LastFmAuthState.FetchingSession) return
+        val token = currentToken
         if (token.isNullOrBlank()) {
             _authState.value = LastFmAuthState.Error("No token requested yet. Please click 'Open Last.fm Login'.")
             return
         }
 
-        viewModelScope.launch {
-            _authState.value = LastFmAuthState.FetchingSession
+        _authState.value = LastFmAuthState.FetchingSession
+        authJob = viewModelScope.launch {
             when (val res = lastFmClient.getSession(token)) {
                 is LastFmResult.Success -> {
                     val session = res.data
                     authRepository.saveSession(session.name, session.key)
+                    currentToken = null
                     settingsRepository.setOnboardingCompleted(true)
                     _authState.value = LastFmAuthState.Connected(session.name)
                 }
@@ -197,6 +215,7 @@ class OnboardingViewModel(
     }
 
     fun disconnect() {
+        authJob?.cancel()
         viewModelScope.launch {
             authRepository.clearSession()
             currentToken = null
@@ -205,6 +224,7 @@ class OnboardingViewModel(
     }
 
     fun cancelAuth() {
+        authJob?.cancel()
         currentToken = null
         _authState.value = LastFmAuthState.Idle
     }
@@ -221,11 +241,12 @@ class OnboardingViewModel(
         private val lastFmClient: LastFmClient
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
             return OnboardingViewModel(
                 settingsRepository = settingsRepository,
                 authRepository = authRepository,
-                lastFmClient = lastFmClient
+                lastFmClient = lastFmClient,
+                savedState = extras.createSavedStateHandle()
             ) as T
         }
     }

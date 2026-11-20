@@ -3,22 +3,25 @@ package com.sscrobbler.app.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.sscrobbler.app.database.HistoryItemEntity
 import com.sscrobbler.app.database.HistoryDao
 import com.sscrobbler.app.lastfm.LastFmAuthRepository
 import com.sscrobbler.app.lastfm.LastFmClient
 import com.sscrobbler.app.lastfm.LastFmHistoryTrack
 import com.sscrobbler.app.lastfm.LastFmResult
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 data class HistoryUiState(
     val items: List<LastFmHistoryTrack> = emptyList(),
     val isLoading: Boolean = false,
     val isRefreshing: Boolean = false,
+    val isLocal: Boolean = false,
     val errorMessage: String? = null
 ) {
     val isEmpty: Boolean get() = items.isEmpty()
@@ -33,65 +36,46 @@ class HistoryViewModel(
     private val _uiState = MutableStateFlow(HistoryUiState(isLoading = true))
     val uiState: StateFlow<HistoryUiState> = _uiState.asStateFlow()
 
+    val deviceHistory = historyDao.getRecentFlow(50).map { entries -> entries.map { it.asTrack() } }
+    private var refreshJob: Job? = null
+
     init {
         loadHistory()
     }
 
-    fun loadHistory() {
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
-            fetchFromLastFm()
-        }
-    }
+    fun loadHistory() = requestHistory(refresh = false)
 
-    fun refresh() {
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isRefreshing = true, errorMessage = null)
-            fetchFromLastFm()
-        }
-    }
+    fun refresh() = requestHistory(refresh = true)
 
-    private suspend fun fetchFromLastFm() {
-        val username = authRepository.getUsername()
-        if (!username.isNullOrBlank()) {
-            when (val res = lastFmClient.getRecentTracks(username, limit = 50)) {
-                is LastFmResult.Success -> {
-                    _uiState.value = HistoryUiState(
-                        items = res.data,
-                        isLoading = false,
-                        isRefreshing = false,
-                        errorMessage = null
+    private fun requestHistory(refresh: Boolean) {
+        if (refreshJob?.isActive == true) return
+        refreshJob = viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = !refresh, isRefreshing = refresh, errorMessage = null)
+            try {
+                val username = authRepository.getUsername()
+                val result = if (username.isNullOrBlank()) null else lastFmClient.getRecentTracks(username, 50)
+                _uiState.value = when (result) {
+                    is LastFmResult.Success -> HistoryUiState(items = result.data)
+                    else -> HistoryUiState(
+                        items = historyDao.getRecent(50).map { it.asTrack() },
+                        isLocal = true,
+                        errorMessage = if (username.isNullOrBlank()) "Connect Last.fm to see your profile history."
+                            else "Last.fm is unavailable. Showing plays saved on this device."
                     )
-                    return
                 }
-                is LastFmResult.Error -> {
-                    // Fall back to local database
-                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(isLoading = false, isRefreshing = false,
+                    errorMessage = "Couldn’t load history. Try refreshing.")
             }
         }
-
-        // Local fallback
-        val localItems = historyDao.getRecent(50).map { entity ->
-            LastFmHistoryTrack(
-                id = entity.id,
-                artist = entity.artist,
-                title = entity.title,
-                album = entity.album,
-                timestamp = entity.timestamp,
-                timeFormatted = java.text.SimpleDateFormat("dd MMM, HH:mm", java.util.Locale.getDefault())
-                    .format(java.util.Date(entity.timestamp * 1000L)),
-                isNowPlaying = false,
-                artworkUrl = entity.artworkUrl
-            )
-        }
-
-        _uiState.value = HistoryUiState(
-            items = localItems,
-            isLoading = false,
-            isRefreshing = false,
-            errorMessage = if (username.isNullOrBlank()) "Log in to Last.fm to see cloud history" else null
-        )
     }
+
+    private fun HistoryItemEntity.asTrack() = LastFmHistoryTrack(
+        id = id, artist = artist, title = title, album = album, timestamp = timestamp,
+        timeFormatted = "", artworkUrl = artworkUrl, localStatus = status
+    )
 
     fun clearLocalHistory() {
         viewModelScope.launch {

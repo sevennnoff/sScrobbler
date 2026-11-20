@@ -149,7 +149,8 @@ class SettingsViewModelTest {
             settingsRepository = settingsRepository,
             authRepository = authRepository,
             playbackTracker = playbackTracker,
-            lastFmClient = lastFmClient
+            lastFmClient = lastFmClient,
+            savedState = androidx.lifecycle.SavedStateHandle(mapOf("browserToken" to "test_token"))
         )
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect()

@@ -1,6 +1,8 @@
 package com.sscrobbler.app.lastfm
 
 import com.sscrobbler.app.database.PendingScrobbleEntity
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -13,10 +15,16 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 open class LastFmClient(
     private val apiKey: String = com.sscrobbler.app.util.Secrets.getApiKey(),
@@ -30,7 +38,7 @@ open class LastFmClient(
     }
 
     private val client: OkHttpClient by lazy {
-        okHttpClient ?: OkHttpClient()
+        okHttpClient ?: OkHttpClient.Builder().callTimeout(20, TimeUnit.SECONDS).build()
     }
 
     private val _connectionErrorFlow = MutableStateFlow<String?>(null)
@@ -88,7 +96,28 @@ open class LastFmClient(
         return LastFmResult.Error(httpCode, "Last.fm error (HTTP $httpCode)")
     }
 
-    private fun <T> executePost(
+    private data class Payload(val code: Int, val text: String) {
+        val isSuccessful: Boolean get() = code in 200..299
+    }
+
+    private suspend fun requestBody(request: Request): Payload = suspendCancellableCoroutine { continuation ->
+        val call = client.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) = continuation.resumeWithException(e)
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    val payload = response.use { Payload(it.code, it.body?.string().orEmpty()) }
+                    continuation.resume(payload)
+                } catch (e: IOException) {
+                    continuation.resumeWithException(e)
+                }
+            }
+        })
+    }
+
+    private suspend fun <T> executePost(
         params: Map<String, String>,
         parser: (String, Int) -> LastFmResult<T>
     ): LastFmResult<T> {
@@ -104,8 +133,8 @@ open class LastFmClient(
 
         val method = params["method"] ?: "unknown"
         return try {
-            val response = client.newCall(request).execute()
-            val bodyString = response.body?.string().orEmpty()
+            val response = requestBody(request)
+            val bodyString = response.text
             if (!response.isSuccessful) {
                 _connectionErrorFlow.value = "Last.fm error (HTTP ${response.code})"
             } else {
@@ -121,6 +150,8 @@ open class LastFmClient(
                 com.sscrobbler.app.util.DebugLog.log("API", "$method -> HTTP ${response.code}, ok")
             }
             result
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: IOException) {
             _connectionErrorFlow.value = "Cannot reach Last.fm (check VPN / network)"
             com.sscrobbler.app.util.DebugLog.log("API", "$method -> network error: ${e.message}")
@@ -300,7 +331,9 @@ open class LastFmClient(
         }
     }
 
-    private val artworkCache = mutableMapOf<String, String>()
+    private val artworkCache = object : LinkedHashMap<String, String>(128, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 256
+    }
 
     open suspend fun getTrackArtworkUrl(artist: String, track: String): String? = withContext(Dispatchers.IO) {
         val cacheKey = "${artist.lowercase().trim()}|${track.lowercase().trim()}"
@@ -311,8 +344,8 @@ open class LastFmClient(
         try {
             val url = "$baseUrl?method=track.getInfo&api_key=$apiKey&artist=${java.net.URLEncoder.encode(artist, "UTF-8")}&track=${java.net.URLEncoder.encode(track, "UTF-8")}&format=json"
             val request = Request.Builder().url(url).build()
-            val response = client.newCall(request).execute()
-            val body = response.body?.string().orEmpty().trim()
+            val response = requestBody(request)
+            val body = response.text.trim()
             if (!response.isSuccessful || !body.startsWith("{")) return@withContext null
 
             val element = json.parseToJsonElement(body).jsonObject
@@ -329,6 +362,8 @@ open class LastFmClient(
                 }
                 return@withContext bigUrl
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
             // Ignored
         }
@@ -339,8 +374,8 @@ open class LastFmClient(
         try {
             val url = "$baseUrl?method=user.getRecentTracks&user=${java.net.URLEncoder.encode(user, "UTF-8")}&api_key=$apiKey&limit=$limit&format=json"
             val request = Request.Builder().url(url).build()
-            val response = client.newCall(request).execute()
-            val body = response.body?.string().orEmpty().trim()
+            val response = requestBody(request)
+            val body = response.text.trim()
             if (!response.isSuccessful || !body.startsWith("{")) {
                 val err = parseLastFmError(body, response.code)
                 _connectionErrorFlow.value = err.message
@@ -361,7 +396,8 @@ open class LastFmClient(
             }
 
             val list = mutableListOf<LastFmHistoryTrack>()
-            for ((idx, elem) in trackListJson.withIndex()) {
+            val occurrences = mutableMapOf<String, Int>()
+            for (elem in trackListJson) {
                 val obj = elem.jsonObject
                 val artistObj = obj["artist"]
                 val artistName = if (artistObj is kotlinx.serialization.json.JsonObject) {
@@ -392,9 +428,13 @@ open class LastFmClient(
                 }
 
                 if (artistName.isNotBlank() && title.isNotBlank()) {
+                    val stamp = if (isNowPlaying) "now" else uts.toString()
+                    val base = "$stamp:${artistName.length}:$artistName:$title"
+                    val occurrence = occurrences.getOrDefault(base, 0)
+                    occurrences[base] = occurrence + 1
                     list.add(
                         LastFmHistoryTrack(
-                            id = "$uts-$idx",
+                            id = "$base:$occurrence",
                             artist = artistName,
                             title = title,
                             album = albumName,
@@ -407,6 +447,8 @@ open class LastFmClient(
                 }
             }
             LastFmResult.Success(list)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             val err = parseLastFmError(e.message.orEmpty(), -1)
             LastFmResult.Error(err.code, "Failed to load recent tracks: ${e.message}", e)
@@ -417,8 +459,8 @@ open class LastFmClient(
         try {
             val url = "$baseUrl?method=user.getInfo&user=${java.net.URLEncoder.encode(username, "UTF-8")}&api_key=$apiKey&format=json"
             val request = Request.Builder().url(url).build()
-            val response = client.newCall(request).execute()
-            val body = response.body?.string().orEmpty().trim()
+            val response = requestBody(request)
+            val body = response.text.trim()
             if (!response.isSuccessful || !body.startsWith("{")) return@withContext null
 
             val element = json.parseToJsonElement(body).jsonObject
@@ -430,6 +472,8 @@ open class LastFmClient(
             if (!rawUrl.isNullOrBlank()) {
                 return@withContext rawUrl.replace(Regex("/u/\\d+x\\d+/"), "/u/300x300/")
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
             // Ignored
         }

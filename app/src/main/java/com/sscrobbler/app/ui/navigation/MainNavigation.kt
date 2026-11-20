@@ -66,7 +66,7 @@ private val tabs = listOf(
 @Composable
 fun MainNavigation(
     nowPlayingViewModel: NowPlayingViewModel,
-    historyViewModel: HistoryViewModel,
+    historyViewModel: () -> HistoryViewModel,
     settingsViewModel: SettingsViewModel,
     onboardingViewModel: OnboardingViewModel,
     initialDestination: AppDestination = AppDestination.NowPlaying,
@@ -144,7 +144,7 @@ fun MainNavigation(
                         viewModel = nowPlayingViewModel
                     )
                     AppDestination.History -> HistoryScreen(
-                        viewModel = historyViewModel
+                        viewModel = historyViewModel()
                     )
                     AppDestination.Settings -> SettingsScreen(
                         viewModel = settingsViewModel,

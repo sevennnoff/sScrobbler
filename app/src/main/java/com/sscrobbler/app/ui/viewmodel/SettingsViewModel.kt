@@ -10,7 +10,11 @@ import android.graphics.drawable.BitmapDrawable
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.createSavedStateHandle
+import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.ViewModel
+import kotlinx.coroutines.Job
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.sscrobbler.app.lastfm.LastFmAuthRepository
@@ -54,13 +58,22 @@ class SettingsViewModel(
     private val settingsRepository: SettingsRepository,
     private val authRepository: LastFmAuthRepository,
     private val playbackTracker: PlaybackTracker? = null,
-    private val lastFmClient: LastFmClient = LastFmClient()
+    private val lastFmClient: LastFmClient = LastFmClient(),
+    private val savedState: SavedStateHandle = SavedStateHandle()
 ) : ViewModel() {
 
     private val permissionStateFlow = MutableStateFlow(Pair(false, false))
     private val scannedAppsFlow = MutableStateFlow<Map<String, AppSourceItem>>(emptyMap())
-    private val _authFlowState = MutableStateFlow<LastFmAuthState>(LastFmAuthState.Idle)
-    private var pendingAuthToken: String? = null
+    private var pendingAuthToken: String?
+        get() = savedState["browserToken"]
+        set(value) { savedState["browserToken"] = value }
+    private var authJob: Job? = null
+
+    fun ownsBrowserToken(token: String): Boolean = token == pendingAuthToken
+
+    private val _authFlowState = MutableStateFlow<LastFmAuthState>(
+        pendingAuthToken?.let { LastFmAuthState.WaitingForBrowser(it) } ?: LastFmAuthState.Idle
+    )
     private var hasScanned = false
 
     private val knownMusicPackages = setOf(
@@ -350,9 +363,11 @@ class SettingsViewModel(
     }
 
     fun startBrowserAuth(context: Context) {
-        viewModelScope.launch {
-            _authFlowState.value = LastFmAuthState.LoadingToken
-            when (val res = lastFmClient.getToken()) {
+        if (authJob?.isActive == true) return
+        _authFlowState.value = LastFmAuthState.LoadingToken
+        authJob = viewModelScope.launch {
+            val result = pendingAuthToken?.let { com.sscrobbler.app.lastfm.LastFmResult.Success(it) } ?: lastFmClient.getToken()
+            when (val res = result) {
                 is com.sscrobbler.app.lastfm.LastFmResult.Success -> {
                     val token = res.data
                     pendingAuthToken = token
@@ -375,13 +390,15 @@ class SettingsViewModel(
     }
 
     fun confirmBrowserAuth(tokenOverride: String? = null) {
-        val token = tokenOverride ?: pendingAuthToken
+        if (tokenOverride != null && !ownsBrowserToken(tokenOverride)) return
+        if (_authFlowState.value == LastFmAuthState.FetchingSession) return
+        val token = pendingAuthToken
         if (token.isNullOrBlank()) {
             _authFlowState.value = LastFmAuthState.Error("No token found. Please start login again.")
             return
         }
-        viewModelScope.launch {
-            _authFlowState.value = LastFmAuthState.FetchingSession
+        _authFlowState.value = LastFmAuthState.FetchingSession
+        authJob = viewModelScope.launch {
             when (val res = lastFmClient.getSession(token)) {
                 is com.sscrobbler.app.lastfm.LastFmResult.Success -> {
                     val session = res.data
@@ -406,11 +423,13 @@ class SettingsViewModel(
     }
 
     fun cancelBrowserAuth() {
+        authJob?.cancel()
         pendingAuthToken = null
         _authFlowState.value = LastFmAuthState.Idle
     }
 
     fun disconnectLastFm() {
+        authJob?.cancel()
         viewModelScope.launch {
             authRepository.clearSession()
             pendingAuthToken = null
@@ -425,12 +444,13 @@ class SettingsViewModel(
         private val lastFmClient: LastFmClient = LastFmClient()
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
             return SettingsViewModel(
                 settingsRepository = settingsRepository,
                 authRepository = authRepository,
                 playbackTracker = playbackTracker,
-                lastFmClient = lastFmClient
+                lastFmClient = lastFmClient,
+                savedState = extras.createSavedStateHandle()
             ) as T
         }
     }

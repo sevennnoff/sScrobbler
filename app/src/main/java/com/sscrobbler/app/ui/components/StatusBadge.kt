@@ -37,7 +37,8 @@ fun StatusBadge(status: ScrobbleStatus, modifier: Modifier = Modifier, isOnline:
     val badge = when (status) {
         ScrobbleStatus.Listening -> Badge("Listening", "Playback in progress", Icons.Default.PlayArrow, c.primary, c.onPrimary)
         ScrobbleStatus.Paused -> Badge("Paused", "Listening time is paused", Icons.Default.Pause, c.surfaceContainerHighest, c.onSurface)
-        ScrobbleStatus.Eligible, ScrobbleStatus.WaitingForEnd ->
+        ScrobbleStatus.Eligible -> Badge("Paused · ready", "Threshold reached", Icons.Default.Pause, c.tertiaryContainer, c.onTertiaryContainer)
+        ScrobbleStatus.WaitingForEnd ->
             Badge("Ready to scrobble", "Submits when playback ends", Icons.Default.HourglassTop, c.tertiaryContainer, c.onTertiaryContainer)
         ScrobbleStatus.Scrobbled -> Badge("Scrobbled", "Confirmed by Last.fm", Icons.Default.CheckCircle, c.primaryContainer, c.onPrimaryContainer)
         ScrobbleStatus.Skipped -> Badge("Skipped", "Below threshold", Icons.Default.SkipNext, c.surfaceContainerHighest, c.onSurfaceVariant)

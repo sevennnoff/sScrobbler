@@ -1,320 +1,134 @@
 package com.sscrobbler.app.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.sscrobbler.app.lastfm.LastFmHistoryTrack
-import com.sscrobbler.app.ui.theme.CardShape
-import com.sscrobbler.app.ui.theme.ChipShape
-import com.sscrobbler.app.ui.theme.PillShape
+import com.sscrobbler.app.ui.components.StatusBadge
 import com.sscrobbler.app.ui.viewmodel.HistoryViewModel
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 
 @Composable
-fun HistoryScreen(
-    viewModel: HistoryViewModel,
-    modifier: Modifier = Modifier
-) {
-    val state by viewModel.uiState.collectAsState()
-
-    LaunchedEffect(Unit) {
-        viewModel.refresh()
+fun HistoryScreen(viewModel: HistoryViewModel, modifier: Modifier = Modifier) {
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val deviceItems by viewModel.deviceHistory.collectAsStateWithLifecycle(initialValue = null)
+    var device by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(viewModel) { viewModel.refresh() }
+    val local = device || state.isLocal
+    val items = if (local) deviceItems ?: if (state.isLocal) state.items else emptyList() else state.items
+    val zone = ZoneId.systemDefault()
+    val days = remember(items, zone) {
+        items.groupBy { if (it.isNowPlaying) null else Instant.ofEpochSecond(it.timestamp).atZone(zone).toLocalDate() }
     }
+    val loading = if (device) deviceItems == null else state.isLoading && items.isEmpty()
 
-    Column(
-        modifier = modifier.fillMaxSize()
-    ) {
-        // Top Bar Header
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text(
-                    text = "History",
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Text(
-                    text = if (state.isRefreshing) "Refreshing from Last.fm..." else "${state.items.size} scrobbles from Last.fm",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            IconButton(onClick = { viewModel.refresh() }) {
-                if (state.isRefreshing) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = "Refresh",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
-        }
-
-        if (state.isLoading && state.isEmpty) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-            }
-        } else if (state.isEmpty) {
-            EmptyHistoryView(message = state.errorMessage)
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                if (!state.errorMessage.isNullOrBlank()) {
-                    item {
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = CardShape,
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Text(
-                                    text = state.errorMessage ?: "Cannot reach Last.fm (check VPN)",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onErrorContainer,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                androidx.compose.material3.TextButton(onClick = { viewModel.refresh() }) {
-                                    Text("Retry", color = MaterialTheme.colorScheme.error)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                items(
-                    items = state.items,
-                    key = { it.id }
-                ) { item ->
-                    LastFmHistoryItemCard(item = item)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun LastFmHistoryItemCard(
-    item: LastFmHistoryTrack,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = CardShape,
-        colors = CardDefaults.cardColors(
-            containerColor = if (item.isNowPlaying) {
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
-            } else {
-                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-            }
-        )
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Surface(
-                shape = ChipShape,
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.size(50.dp)
-            ) {
-                if (!item.artworkUrl.isNullOrBlank()) {
-                    AsyncImage(
-                        model = item.artworkUrl,
-                        contentDescription = item.title,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .clip(ChipShape),
-                        contentScale = ContentScale.Crop
-                    )
-                } else {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Default.MusicNote,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(24.dp)
-                        )
+    Column(modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(Modifier.widthIn(max = 760.dp).fillMaxSize().padding(horizontal = 20.dp)) {
+            Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("History", Modifier.weight(1f), style = MaterialTheme.typography.headlineLarge)
+                if (!device) {
+                    FilledTonalIconButton(onClick = viewModel::refresh, enabled = !state.isRefreshing && !state.isLoading) {
+                        if (state.isRefreshing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        else Icon(Icons.Default.Refresh, "Refresh history")
                     }
                 }
             }
-
-            Column(
-                modifier = Modifier.weight(1f)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                listOf("Last.fm", "On device").forEachIndexed { index, label ->
+                    SegmentedButton(
+                        selected = device == (index == 1),
+                        onClick = { device = index == 1 },
+                        shape = SegmentedButtonDefaults.itemShape(index, 2)
+                    ) { Text(label) }
+                }
+            }
+            if (!device) state.errorMessage?.let { message ->
+                Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.tertiaryContainer) {
+                    Text(message, Modifier.fillMaxWidth().padding(14.dp), style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            when {
+                loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+                items.isEmpty() -> Box(Modifier.fillMaxSize().padding(20.dp), contentAlignment = Alignment.Center) {
+                    Text(if (local) "No plays saved on this device yet" else "No scrobbles yet",
+                        style = MaterialTheme.typography.titleMedium)
+                }
+                else -> LazyColumn(
+                    contentPadding = PaddingValues(bottom = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
-                    Text(
-                        text = item.title,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-
-                    if (item.isNowPlaying) {
-                        Surface(
-                            shape = PillShape,
-                            color = MaterialTheme.colorScheme.primary
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.GraphicEq,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onPrimary,
-                                    modifier = Modifier.size(12.dp)
-                                )
-                                Text(
-                                    text = "Scrobbling",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onPrimary,
-                                    fontWeight = FontWeight.Bold
-                                )
+                    days.forEach { (date, tracks) ->
+                        item(key = "section:$date") {
+                            val today = LocalDate.now(zone)
+                            val heading = when (date) {
+                                null -> "Now playing"
+                                today -> "Today"
+                                today.minusDays(1) -> "Yesterday"
+                                else -> date.format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM))
+                            }
+                            Text(heading, Modifier.padding(top = 14.dp, bottom = 5.dp),
+                                style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                        }
+                        itemsIndexed(tracks, key = { _, item -> item.id }) { index, item ->
+                            val top = if (index == 0) 22.dp else 6.dp
+                            val bottom = if (index == tracks.lastIndex) 22.dp else 6.dp
+                            val shape = RoundedCornerShape(topStart = top, topEnd = top, bottomStart = bottom, bottomEnd = bottom)
+                            Surface(modifier = Modifier.animateItem().fillMaxWidth(), shape = shape,
+                                color = if (item.isNowPlaying) MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.surfaceContainer) {
+                                HistoryRow(item, zone)
                             }
                         }
                     }
                 }
-
-                Spacer(modifier = Modifier.height(2.dp))
-
-                Text(
-                    text = item.artist,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                if (!item.album.isNullOrBlank()) {
-                    Text(
-                        text = item.album,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-
-            if (!item.isNowPlaying) {
-                Text(
-                    text = item.timeFormatted,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
         }
     }
 }
 
 @Composable
-fun EmptyHistoryView(message: String? = null) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Surface(
-            shape = PillShape,
-            color = MaterialTheme.colorScheme.primaryContainer,
-            modifier = Modifier.size(72.dp)
-        ) {
+private fun HistoryRow(item: LastFmHistoryTrack, zone: ZoneId) {
+    Row(Modifier.fillMaxWidth().animateContentSize().padding(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest,
+            modifier = Modifier.size(54.dp)) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    imageVector = Icons.Default.MusicNote,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.size(36.dp)
-                )
+                Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.primary)
+                if (!item.artworkUrl.isNullOrBlank()) AsyncImage(item.artworkUrl, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             }
         }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        Text(
-            text = "No scrobbles yet",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-            text = message ?: "Your played tracks from Last.fm will appear here in chronological order.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-        )
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(item.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(listOfNotNull(item.artist, item.album?.takeIf { it.isNotBlank() }).joinToString(" · "),
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (!item.isNowPlaying) {
+                val time = remember(item.timestamp, zone) {
+                    Instant.ofEpochSecond(item.timestamp).atZone(zone).format(DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT))
+                }
+                Text(time, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            item.localStatus?.let { StatusBadge(it, Modifier.padding(top = 4.dp), showSubtext = false) }
+        }
     }
 }

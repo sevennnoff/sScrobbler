@@ -93,7 +93,8 @@ class OnboardingViewModelTest {
         val viewModel = OnboardingViewModel(
             settingsRepository = settingsRepository,
             authRepository = authRepository,
-            lastFmClient = lastFmClient
+            lastFmClient = lastFmClient,
+            savedState = androidx.lifecycle.SavedStateHandle(mapOf("browserToken" to "mock_token"))
         )
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect()
@@ -104,17 +105,15 @@ class OnboardingViewModelTest {
             LastFmSession("test_listener", "mock_session_key")
         )
 
-        // Inject token via private property reflection or helper flow
-        val tokenField = OnboardingViewModel::class.java.getDeclaredField("currentToken")
-        tokenField.isAccessible = true
-        tokenField.set(viewModel, "mock_token")
-
-        viewModel.confirmBrowserAuth()
+        viewModel.confirmBrowserAuth("wrong_token")
+        viewModel.confirmBrowserAuth("mock_token")
+        viewModel.confirmBrowserAuth("mock_token")
         runCurrent()
 
         val state = viewModel.uiState.value
         assertTrue("Auth state should be Connected", state.authState is LastFmAuthState.Connected)
         assertEquals("test_listener", (state.authState as LastFmAuthState.Connected).username)
+        coVerify(exactly = 1) { lastFmClient.getSession(any()) }
         coVerify(exactly = 1) { authRepository.saveSession("test_listener", "mock_session_key") }
     }
 
